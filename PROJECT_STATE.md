@@ -60,3 +60,15 @@ Not yet validated: Docker build/compose runtime, live Binance network snapshot, 
 - Karar: decision_log/2026-10-27-timemachine.md.
 - Durum: specification accepted; implementation, schemas, config wiring and tests pending.
 - Çalışan runtime, replay ve test sayısı değiştirilmedi. VPS kontrolü/smoke hâlâ sıradaki iş.
+
+## VPS evidence and stream bootstrap correction — 2026-10-27
+
+User-reported VPS evidence at /docker/hermes-agent-qbva/data/signal-desk-prediction:
+- Docker API image built; config/schema validation passed with cfg-v16-example-001.
+- Existing test suite: 16 passed in 0.40s; API healthy, paper, execution_enabled=false,
+  ready_for_enter=false. REST snapshot wrote raw events.
+- Live WebSocket smoke FAILED: exit 2, gap_count=1, RESYNCING. Not a feed acceptance.
+- Bootstrap fix now has 24 locally passing tests and config/schema validation.
+- New image build and live retest on VPS pending; no 24h soak or profitability claim.
+- Fix/research source and bounds: decision_log/2026-10-27-binance-stream-bootstrap.md.
+- Continuous reconnect/resync and resource soak are still pending.

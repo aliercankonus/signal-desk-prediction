@@ -70,72 +70,155 @@ def stream_url(config: dict) -> str:
     return f"{base}/stream?streams={'/'.join(streams)}"
 
 
-async def run_stream_async(config_path: str, max_events: int | None = None) -> int:
-    config = validate_config(config_path)
+class StreamSyncError(RuntimeError):
+    pass
+
+
+# Smoke-test bounds, not a claim of continuous collector readiness.
+STREAM_BUFFER_LIMIT = 256
+STREAM_MESSAGE_MAX_BYTES = 256 * 1024
+STREAM_WAIT_SECONDS = 10
+SNAPSHOT_ATTEMPTS = 3
+
+
+async def collect_connected_stream(ws: Any, config: dict, max_events: int | None) -> dict:
+    """Buffer before REST; publish RUNNING only after a depth update bridges the snapshot."""
+    from collections import deque
+
     ex = config["exchange"]
     symbol = ex["symbol"]
-    book = L2BookState()
-    depth_events = 0
-    trade_events = 0
-    gap_count = 0
+    queue: asyncio.Queue = asyncio.Queue(maxsize=STREAM_BUFFER_LIMIT)
 
-    snapshot = fetch_depth_snapshot(ex["endpoints"]["rest_base_url"], symbol, int(ex["market_data"]["snapshot_limit"]))
-    snapshot_event = map_snapshot(snapshot, symbol=symbol, raw_stream="rest_depth_snapshot")
-    book.apply_snapshot(snapshot_event)
-    write_event(config, snapshot_event)
-    write_status(config, "RUNNING", "snapshot_applied", last_update_id=book.last_update_id)
-
-    url = stream_url(config)
-    written = 1
-    async with websockets.connect(url, ping_interval=20, ping_timeout=10, close_timeout=5) as ws:
-        write_status(config, "RUNNING", "websocket_connected", stream_url=url, last_update_id=book.last_update_id)
-        async for raw in ws:
-            message = json.loads(raw)
-            payload = message.get("data", message)
-            event_type = payload.get("e")
-            try:
-                if event_type == "depthUpdate":
+    async def receive() -> None:
+        try:
+            async for raw in ws:
+                message = json.loads(raw)
+                # Map at receipt, so REST latency doesn't become received_ts.
+                payload = message.get("data", message)
+                kind = payload.get("e")
+                if kind == "depthUpdate":
                     event = map_depth_delta(payload, symbol=symbol, raw_stream=message.get("stream"))
-                    book.apply_delta(event)
-                    event["previous_final_update_id"] = book.last_update_id
-                    depth_events += 1
-                    write_event(config, event)
-                elif event_type == "trade":
+                elif kind == "trade":
                     event = map_trade(payload, symbol=symbol, raw_stream=message.get("stream"))
-                    trade_events += 1
-                    write_event(config, event)
                 else:
                     continue
-            except OrderBookGap as exc:
-                gap_count += 1
-                write_status(config, "RESYNCING", str(exc), gap_count=gap_count)
-                return 2
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull as exc:
+                    raise StreamSyncError("WebSocket buffer overflow; restart synchronization") from exc
+            raise StreamSyncError("WebSocket closed before smoke test completed")
+        except Exception as exc:
+            # Wake a waiting consumer; when full it checks reader.result() first.
+            try:
+                queue.put_nowait(exc)
+            except asyncio.QueueFull:
+                pass
+            raise
+
+    reader = asyncio.create_task(receive())
+
+    async def next_event() -> dict:
+        if reader.done():
+            reader.result()
+        try:
+            event = await asyncio.wait_for(queue.get(), STREAM_WAIT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise StreamSyncError("Timed out waiting for market data") from exc
+        if isinstance(event, Exception):
+            raise event
+        return event
+
+    try:
+        pending: deque = deque()
+        write_status(config, "SYNCING", "buffering_before_snapshot")
+        # Wait for the first depth event, retaining earlier trades in arrival order.
+        while True:
+            event = await next_event()
+            pending.append(event)
+            if event["event_type"] == "book_delta":
+                first_depth_id = event["first_update_id"]
+                break
+            if len(pending) >= STREAM_BUFFER_LIMIT:
+                raise StreamSyncError("No depth event within bootstrap buffer limit")
+
+        for attempt in range(1, SNAPSHOT_ATTEMPTS + 1):
+            # Blocking REST must not prevent the receiver from buffering WS events.
+            snapshot = await asyncio.to_thread(
+                fetch_depth_snapshot, ex["endpoints"]["rest_base_url"], symbol,
+                int(ex["market_data"]["snapshot_limit"]),
+            )
+            if reader.done():
+                reader.result()
+            if int(snapshot["lastUpdateId"]) >= first_depth_id:
+                break
+            write_status(config, "SYNCING", "snapshot_behind_buffer", snapshot_attempt=attempt)
+        else:
+            raise StreamSyncError("Snapshot remained behind first buffered depth event")
+
+        book = L2BookState()
+        snapshot_event = map_snapshot(snapshot, symbol=symbol, raw_stream="rest_depth_snapshot")
+        book.apply_snapshot(snapshot_event)
+        write_event(config, snapshot_event)
+        written = 1
+        depth_events = trade_events = stale_depth_events = 0
+        synchronized = False
+        while True:
+            if reader.done():
+                reader.result()
+            event = pending.popleft() if pending else await next_event()
+            if event["event_type"] == "book_delta":
+                previous_id = book.last_update_id
+                if event["final_update_id"] <= previous_id:
+                    stale_depth_events += 1
+                    continue
+                book.apply_delta(event)  # Gaps still fail closed.
+                event["previous_final_update_id"] = previous_id
+                depth_events += 1
+                if not synchronized:
+                    synchronized = True
+                    write_status(config, "RUNNING", "depth_bridge_applied",
+                                 last_update_id=book.last_update_id)
+            else:
+                trade_events += 1
+            write_event(config, event)
             written += 1
-            if written % 100 == 0:
-                write_status(
-                    config,
-                    "RUNNING",
-                    "streaming",
-                    written_events=written,
-                    depth_events=depth_events,
-                    trade_events=trade_events,
-                    gap_count=gap_count,
-                    last_update_id=book.last_update_id,
-                )
-            if max_events is not None and written >= max_events:
-                write_status(
-                    config,
-                    "STOPPED",
-                    "max_events_reached",
-                    written_events=written,
-                    depth_events=depth_events,
-                    trade_events=trade_events,
-                    gap_count=gap_count,
-                    last_update_id=book.last_update_id,
-                )
-                print(json.dumps({"status": "ok", "written_events": written, "depth_events": depth_events, "trade_events": trade_events, "gap_count": gap_count}))
-                return 0
-    return 0
+            stats = dict(written_events=written, depth_events=depth_events,
+                         trade_events=trade_events, stale_depth_events=stale_depth_events,
+                         gap_count=0, last_update_id=book.last_update_id)
+            if synchronized and written % 100 == 0:
+                write_status(config, "RUNNING", "streaming", **stats)
+            # Trades alone must never qualify a synchronized-book smoke test.
+            if synchronized and max_events is not None and written >= max_events:
+                write_status(config, "STOPPED", "max_events_reached", **stats)
+                return stats
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+
+
+async def run_stream_async(config_path: str, max_events: int | None = None) -> int:
+    config = validate_config(config_path)
+    try:
+        if max_events is not None and max_events < 2:
+            raise ValueError("--max-events must be at least 2 (snapshot and depth bridge)")
+        write_status(config, "CONNECTING", "opening_websocket")
+        async with websockets.connect(
+            stream_url(config), ping_interval=20, ping_timeout=10, close_timeout=5,
+            open_timeout=10, max_size=STREAM_MESSAGE_MAX_BYTES, max_queue=16,
+        ) as ws:
+            stats = await collect_connected_stream(ws, config, max_events)
+        print(json.dumps({"status": "ok", **stats}), flush=True)
+        return 0
+    except (OrderBookGap, StreamSyncError) as exc:
+        gap_count = int(isinstance(exc, OrderBookGap))
+        write_status(config, "RESYNCING", str(exc), gap_count=gap_count)
+        print(json.dumps({"status": "RESYNCING", "reason": str(exc),
+                          "gap_count": gap_count}), flush=True)
+        return 2
+    except Exception as exc:
+        write_status(config, "ERROR", str(exc))
+        print(json.dumps({"status": "ERROR", "reason": str(exc)}), flush=True)
+        return 1
 
 
 def run_stream(config_path: str, max_events: int | None = None) -> int:
