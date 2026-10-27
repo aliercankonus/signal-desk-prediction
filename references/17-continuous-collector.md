@@ -84,3 +84,18 @@ gaps, disconnects, retry exhaustion/reset, HTTP refusal, stale depth, disk/raw c
 deadline cancellation and a second writer. Local HTTP integration exercises the
 actual snapshot child process for HTTP 200 and 429. VPS resource enforcement,
 60s continuous run and live network fault recovery are pending.
+
+## 2026-10-27 — Stale incident follow-up
+User-reported first continuous VPS run: 817 persisted records (130 depth, 684 trade,
+3 snapshots), gap_count=0, two stale-depth resyncs. Final exit code was not provided.
+Do not accept stability/soak or merge on that output alone.
+Per-event schema reloading/meta-validation was found in the hot path and replaced
+with bounded checked-validator reuse. Instance validation and fsync remain enabled.
+The 2s/3s configured freshness limits and recovery behavior are unchanged.
+Add current-event age, depth receipt/application age, queue high-water, event-loop lag,
+validation and write/IO timing. Keep last failure diagnostics across a later session.
+These measurements separate observed receipt/processing delays; no network root cause
+has been proven. Main remains unchanged.
+Local suite now 53 passed; config/schema validation passed.
+An isolated local 100-event validation benchmark was 0.6502s before vs 0.0203s after;
+this is not an end-to-end or VPS performance claim. VPS rebuild and 60s repeat pending.

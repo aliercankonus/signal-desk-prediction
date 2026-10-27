@@ -37,7 +37,7 @@ def test_gap_and_disconnect_rebootstrap_with_backoff(monkeypatch, config):
         if len(sessions) == 1:
             raise OrderBookGap("depth gap")
         if len(sessions) == 2:
-            raise stream.StreamSyncError("connection closed")
+            raise stream.StreamSyncError("connection closed", {"queue_events": 4})
         on_progress({})
         await asyncio.Event().wait()
 
@@ -50,6 +50,7 @@ def test_gap_and_disconnect_rebootstrap_with_backoff(monkeypatch, config):
     assert len(set(sessions)) == 3
     assert waits == [1, 2]
     assert config["_collector_runtime"]["gap_count"] == 1
+    assert config["_collector_runtime"]["last_error_diagnostics"]["queue_events"] == 4
     assert statuses[-1][:2] == ("STOPPED", "max_run_seconds_reached")
 
 

@@ -57,7 +57,12 @@ class CollectorStorageError(RuntimeError):
 
 
 def write_event(config: dict, event: dict) -> None:
+    started = time.perf_counter()
     validate_json(event, "market_event.schema.json")
+    metrics = config.get("_pipeline_metrics")
+    validation_ms = (time.perf_counter() - started) * 1000
+    if metrics is not None:
+        metrics["max_validation_ms"] = max(metrics["max_validation_ms"], validation_ms)
     suffix = "depth" if event["event_type"] in {"book_snapshot", "book_delta"} else "trade"
     runtime = config.get("_collector_runtime")
     if runtime is not None:
@@ -65,12 +70,17 @@ def write_event(config: dict, event: dict) -> None:
                                          "collector_session_id": runtime["session_id"]}}
     size = len((json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
     guard = config.get("_storage_guard")
+    io_started = time.perf_counter()
     try:
         if guard is not None:
             guard.check(size)
         append_jsonl(raw_file(config, suffix), event)
     except OSError as exc:
         raise CollectorStorageError(str(exc)) from exc
+    if metrics is not None:
+        metrics["last_write_ms"] = (time.perf_counter() - started) * 1000
+        metrics["max_write_ms"] = max(metrics["max_write_ms"], metrics["last_write_ms"])
+        metrics["max_io_ms"] = max(metrics["max_io_ms"], (time.perf_counter() - io_started) * 1000)
     if guard is not None:
         guard.used += size
     if runtime is not None:
@@ -99,7 +109,9 @@ def stream_url(config: dict) -> str:
 
 
 class StreamSyncError(RuntimeError):
-    pass
+    def __init__(self, reason, diagnostics=None):
+        super().__init__(reason)
+        self.diagnostics = diagnostics or {}
 
 
 # Smoke-test bounds, not a claim of continuous collector readiness.
@@ -152,6 +164,45 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
     symbol = ex["symbol"]
     policy = RecoveryPolicy.from_config(config)
     queue: asyncio.Queue = asyncio.Queue(maxsize=STREAM_BUFFER_LIMIT)
+    metrics = {
+        "received_depth_events": 0, "received_trade_events": 0,
+        "queue_high_water": 0, "max_event_loop_lag_ms": 0.,
+        "max_validation_ms": 0., "max_io_ms": 0.,
+        "last_write_ms": 0., "max_write_ms": 0.,
+        "last_depth_received_ns": None, "last_depth_applied_ns": None,
+    }
+    config["_pipeline_metrics"] = metrics
+    if "_collector_runtime" in config:
+        config["_collector_runtime"]["pipeline_metrics"] = metrics
+    watch_deadline = time.monotonic() + .1
+
+    async def watch_loop():
+        nonlocal watch_deadline
+        while True:
+            await asyncio.sleep(.1)
+            metrics["max_event_loop_lag_ms"] = max(
+                metrics["max_event_loop_lag_ms"],
+                max(0., time.monotonic() - watch_deadline) * 1000,
+            )
+            watch_deadline = time.monotonic() + .1
+
+    def diagnostics(event=None):
+        stamp = time.monotonic_ns()
+        def age(value):
+            return None if value is None else max(0., (stamp - value) / 1e6)
+        result = {**metrics, "queue_events": queue.qsize(),
+                  "depth_receive_age_ms": age(metrics["last_depth_received_ns"]),
+                  "depth_applied_age_ms": age(metrics["last_depth_applied_ns"]),
+                  "current_event_age_ms": age(event.get("monotonic_ns")) if event else None}
+        result["max_event_loop_lag_ms"] = max(
+            result["max_event_loop_lag_ms"],
+            max(0., time.monotonic() - watch_deadline) * 1000,
+        )
+        return result
+
+    def sync_error(reason, event=None):
+        return StreamSyncError(reason, diagnostics(event))
+
 
     async def receive() -> None:
         try:
@@ -164,14 +215,18 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
                     raise StreamSyncError("Binance serverShutdown; resynchronize on a new connection")
                 if kind == "depthUpdate":
                     event = map_depth_delta(payload, symbol=symbol, raw_stream=message.get("stream"))
+                    metrics["received_depth_events"] += 1
+                    metrics["last_depth_received_ns"] = event["monotonic_ns"]
                 elif kind == "trade":
                     event = map_trade(payload, symbol=symbol, raw_stream=message.get("stream"))
+                    metrics["received_trade_events"] += 1
                 else:
                     continue
                 try:
                     queue.put_nowait(event)
+                    metrics["queue_high_water"] = max(metrics["queue_high_water"], queue.qsize())
                 except asyncio.QueueFull as exc:
-                    raise StreamSyncError("WebSocket buffer overflow; restart synchronization") from exc
+                    raise sync_error("WebSocket buffer overflow; restart synchronization") from exc
             raise StreamSyncError("WebSocket closed; synchronization session ended")
         except Exception as exc:
             # Wake a waiting consumer; when full it checks reader.result() first.
@@ -182,6 +237,7 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
             raise
 
     reader = asyncio.create_task(receive())
+    watcher = asyncio.create_task(watch_loop())
 
     async def next_event(timeout=None) -> dict:
         if reader.done():
@@ -189,7 +245,7 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
         try:
             event = await asyncio.wait_for(queue.get(), STREAM_WAIT_SECONDS if timeout is None else timeout)
         except asyncio.TimeoutError as exc:
-            raise StreamSyncError("Timed out waiting for market data") from exc
+            raise sync_error("Timed out waiting for market data") from exc
         if isinstance(event, Exception):
             raise event
         return event
@@ -241,9 +297,9 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
             deadline = min(last_depth + depth_stale_seconds, last_trade + trade_stale_seconds) if synchronized else bridge_deadline
             event = pending.popleft() if pending else await next_event(min(STREAM_WAIT_SECONDS, max(.001, deadline - now())))
             if synchronized and now() - last_depth > depth_stale_seconds:
-                raise StreamSyncError("Depth feed stale while other messages continue")
+                raise sync_error("Depth feed stale while other messages continue", event)
             if synchronized and now() - last_trade > trade_stale_seconds:
-                raise StreamSyncError("Trade feed stale while depth messages continue")
+                raise sync_error("Trade feed stale while depth messages continue", event)
             if not synchronized and now() > bridge_deadline:
                 raise StreamSyncError("Timed out waiting for depth bridge")
             if event["event_type"] == "book_delta":
@@ -252,9 +308,10 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
                     stale_depth_events += 1
                     continue
                 if (time.monotonic_ns() - event["monotonic_ns"]) / 1e9 > depth_stale_seconds:
-                    raise StreamSyncError("Buffered depth update is stale")
+                    raise sync_error("Buffered depth update is stale", event)
                 book.apply_delta(event)  # Gaps still fail closed.
                 last_depth = now()
+                metrics["last_depth_applied_ns"] = event["monotonic_ns"]
                 event["previous_final_update_id"] = previous_id
                 depth_events += 1
                 if not synchronized:
@@ -280,7 +337,8 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
                 return stats
     finally:
         reader.cancel()
-        await asyncio.gather(reader, return_exceptions=True)
+        watcher.cancel()
+        await asyncio.gather(reader, watcher, return_exceptions=True)
 
 
 
@@ -303,9 +361,11 @@ async def run_stream_async(config_path: str, max_events: int | None = None) -> i
         return 0
     except (OrderBookGap, StreamSyncError) as exc:
         gap_count = int(isinstance(exc, OrderBookGap))
-        write_status(config, "RESYNCING", str(exc), gap_count=gap_count)
+        write_status(config, "RESYNCING", str(exc), gap_count=gap_count,
+                     diagnostics=getattr(exc, "diagnostics", {}))
         print(json.dumps({"status": "RESYNCING", "reason": str(exc),
-                          "gap_count": gap_count}), flush=True)
+                          "gap_count": gap_count,
+                          "diagnostics": getattr(exc, "diagnostics", {})}), flush=True)
         return 2
     except Exception as exc:
         write_status(config, "ERROR", str(exc))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from jsonschema import Draft202012Validator
@@ -18,9 +19,17 @@ def load_schema(schema_name: str, schema_dir: str | Path = "schemas") -> dict[st
     return data
 
 
+@lru_cache(maxsize=32)
+def _checked_validator(path_string: str, identity: tuple) -> Draft202012Validator:
+    path = Path(path_string)
+    return Draft202012Validator(load_schema(path.name, path.parent))
+
+
 def validate_json(instance: dict[str, Any], schema_name: str, schema_dir: str | Path = "schemas") -> None:
-    schema = load_schema(schema_name, schema_dir)
-    validator = Draft202012Validator(schema)
+    path = (Path(schema_dir) / schema_name).resolve()
+    stat = path.stat()
+    identity = (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+    validator = _checked_validator(str(path), identity)
     errors = sorted(validator.iter_errors(instance), key=lambda e: list(e.path))
     if errors:
         msg = "\n".join(f"{list(e.path)}: {e.message}" for e in errors)

@@ -87,6 +87,7 @@ async def continuous_loop(config, policy, *, max_run_seconds=None):
             except (stream.StreamSyncError, OrderBookGap, OSError, ConnectionClosed,
                     InvalidStatusCode, asyncio.TimeoutError) as exc:
                 runtime["session_synchronized"] = False
+                runtime["last_error_diagnostics"] = getattr(exc, "diagnostics", {})
                 status_code = getattr(exc, "status_code", None)
                 if status_code is None:
                     status_code = getattr(exc, "http_status", None)
