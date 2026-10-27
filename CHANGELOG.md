@@ -50,3 +50,10 @@
 - Separated synthetic Monte Carlo scenarios from historical strategy-rule tests and existing event replay.
 - Defined BTC/UTC, costs, stop-gap, causality, resource and acceptance requirements.
 - Documentation/skill update only; no simulator implementation or newly passing runtime tests.
+
+## 2026-10-27 — Binance stream bootstrap fix
+- Open and buffer WS before the REST snapshot; REST no longer blocks the receiver.
+- Retry old snapshots within a bounded budget, discard covered deltas, require depth bridge.
+- Preserve previous update ID, stop on genuine gaps/overflow, print failure JSON.
+- Added 8 mocked stream regression tests; full local suite 24 passed.
+- VPS rebuild/live retest pending; continuous collector readiness not established.
