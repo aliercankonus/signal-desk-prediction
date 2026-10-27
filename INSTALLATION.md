@@ -24,15 +24,11 @@ Aşağıdaki tek shell işlemi, önce dosyanın tamamen indirilmesini bekler:
 ```bash
 sudo bash -c 'set -eu; command -v curl >/dev/null || { apt-get update; apt-get install -y ca-certificates curl; }; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL https://raw.githubusercontent.com/aliercankonus/signal-desk-prediction/main/scripts/install.sh -o "$f"; bash "$f" --install-docker'
 ```
-Bu main URL'si, installer PR'ı main'e alındıktan sonra kullanılmalıdır.
 Varsayılan hedef /opt/signal-desk-prediction. Özel hedef/ref için indirilen script'e
 `--dir /chosen/path --ref COMMIT_SHA` ver. Script repo içindeyse mevcut yolunu bulur.
 Tekrarlanabilir kod sürümü için branch yerine tam commit SHA tercih et.
 Docker/OS paketleri ve temel image tag'i bit düzeyinde sabitlenmiş değildir;
 gerçek git/image/config/Python/dependency sürümleri yerel manifest'e kaydedilir.
-
-PR adayı henüz main'de değilken URL ve --ref için feat/one-command-install
-kullanılabilir; bu bir release/temiz-sunucu kabulü değildir.
 
 ## Sıra ve başarı ölçütü
 1. Host/container ve opsiyonel expected-host kontrolü.

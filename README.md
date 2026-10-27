@@ -13,9 +13,35 @@ Config ve data volume korunur; script build, config/schema, tüm testler, kısa 
 Binance smoke ve API health kontrolünü sırayla yapar. Yalnız API başlar, collector
 varsayılanı idle kalır. Mevcut Docker engine yeniden kurulmaz.
 
+## Yeni sunucuda tek işlemle kurulum
+
+Ubuntu 22.04/24.04 sunucusunun ana terminalinde (root/sudo):
+
+```bash
+sudo bash -c 'set -eu; command -v curl >/dev/null || { apt-get update; apt-get install -y ca-certificates curl; }; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL https://raw.githubusercontent.com/aliercankonus/signal-desk-prediction/main/scripts/install.sh -o "$f"; bash "$f" --install-docker'
+```
+
+Varsayılan checkout `/opt/signal-desk-prediction`, API adresi
+`127.0.0.1:8080` olur. Komutu VPS host terminalinden çalıştır.
+Geçmiş veri/model taşıma ve devamlı collector başlatma ayrı adımlardır.
+
 Yeni Ubuntu sunucusu ve tam parametreler: [INSTALLATION.md](INSTALLATION.md).
 Tüm manuel kurulum/teşhis/test komutları: [docs/COMMANDS.md](docs/COMMANDS.md).
 Dağıtım giriş noktası: [VPS_DEPLOYMENT.md](VPS_DEPLOYMENT.md).
+
+## Kurulum komutları ve kayıtlar
+
+| İhtiyaç | Repository'deki kaynak |
+| --- | --- |
+| Yeni/mevcut sunucu kurulumu, parametreler ve hata davranışı | [INSTALLATION.md](INSTALLATION.md) |
+| Docker/host teşhisi, config, build, test, API, snapshot ve stream komutları | [docs/COMMANDS.md](docs/COMMANDS.md) |
+| Kaynak, recovery, bir saatlik soak ve raw-session audit komutları | [docs/COMMANDS.md](docs/COMMANDS.md) |
+| Güncel teknik durum ve kalan kabul adımları | [PROJECT_STATE.md](PROJECT_STATE.md) |
+
+Her installer koşusu `runtime/install/run.*/` altında `deploy.log`, commit/config
+hash'i ve başarılıysa `manifest.json` üretir. Sonraki kurulum aynı script'ten
+yürütülür ve kullanılan sürümler kaydedilir. Manuel komut kataloğunda sunucu yolu,
+hostname ve session ID gibi değerler parametre olarak verilir.
 
 ## Kanıt ve güncel sınır
 - Collector snapshot, 25/1.000-record smoke, süreli continuous ve recovery testleri görüldü.
