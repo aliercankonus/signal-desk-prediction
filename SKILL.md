@@ -65,3 +65,7 @@ Sürekli toplama, reconnect veya resync işlerinde [collector sözleşmesini](re
 ## Ham veri kabulü ve replay öncesi kontrol
 
 Kaydedilmiş oturumun bütünlüğü için [raw-session audit sözleşmesini](references/18-data-audit.md) uygula. Önce tamamlanmış collector oturumunu session_id ile seç; sayım, şema, sıra ve dosya hash kontrollerini yap. Araç ham dosyaları değiştirmez. Büyük ham dosyayı listeye yükleyen mevcut replay okuyucusunu bu kontrolün yerine kullanma. Audit başarısı live/replay parity kabulü değildir.
+
+## Tek işlemle taşınabilir kurulum
+
+Kurulum veya yeniden kurulumda [INSTALLATION.md](INSTALLATION.md) ve [komut kataloğunu](docs/COMMANDS.md) uygula. install.sh mevcut checkout'u kullanır veya seçilmiş boş hedefe clone eder; deploy.sh aşamaları başarısızlıkta durdurur. Aktif config/veriyi koru, başka servisleri temizleme. Kurulum logu/manifest yerelde runtime/install altında kalır. Installer'ın yerel mock testini gerçek temiz-host, restore veya paper-ready kabulü sayma. Gerçek main merge için otomatik inceleme açık kullanıcı onayı isterse yalnız somut PR için onay al; ret işlemini ref güncellemesiyle aşma.

@@ -1,68 +1,31 @@
-# signal-desk-prediction v16
+# Signal Desk Prediction
 
-Sıfırdan kurulacak, taşınabilir, Binance BTCUSDT spot paper-only kısa vadeli tahmin, replay, EOD ve karar sistemi paketi.
+Binance BTCUSDT spot için paper-only collector, araştırma, replay ve karar sistemi.
+Gerçek emir kapalıdır. Çalışan collector, kârlı strateji veya tamamlanmış paper ledger
+anlamına gelmez.
 
-Bu paket canlı trading yazılımı değildir. Gerçek emir üretmez; amaç G0-G2/G3 hazırlığını çalışan kod iskeletiyle ilerletmektir.
-
-## v16 değişiklikleri
-
-- v14 runnable skeleton üzerine replay runner eklendi.
-- Basit causal feature engine eklendi: L2 top-of-book + trade delta feature snapshot üretir.
-- Storage manifest üretici eklendi; runtime dosyalarını hash ve byte bilgisiyle listeler.
-- EOD skeleton eklendi; raw/features/ledger sayımlarını idempotent JSON rapora döker.
-- Alarm manager eklendi; disk/RAM/stale/ledger hatalarını INFO/WARN/BLOCK/HALT aksiyonlarına çevirir.
-- Binance L2 gap detection testleri genişletildi.
-- Test suite 16 teste çıkarıldı.
-
-## Ana dosyalar
-
-- `SKILL.md`: kısa kullanım rehberi.
-- `references/`: ayrıntılı teknik sözleşmeler.
-- `schemas/`: JSON schema sözleşmeleri.
-- `config/config.example.yaml`: örnek config.
-- `src/signal_desk/`: çalışan Python skeleton.
-- `tests/`: otomatik testler.
-- `PROJECT_STATE.md`: mevcut hazırlık durumu.
-- `CHANGELOG.md`: değişiklik kayıtları.
-
-## Quick start
-
+## Tek işlemle mevcut kurulum
+Repo içinden:
 ```bash
-cp .env.example .env
-cp config/config.example.yaml config/config.yaml
-PYTHONPATH=src ./scripts/bootstrap.sh
-PYTHONPATH=src ./scripts/preflight.sh
-PYTHONPATH=src python -m pytest -q
+bash scripts/install.sh
 ```
+Config ve data volume korunur; script build, config/schema, tüm testler, kısa public
+Binance smoke ve API health kontrolünü sırayla yapar. Yalnız API başlar, collector
+varsayılanı idle kalır. Mevcut Docker engine yeniden kurulmaz.
 
-## Replay / EOD örnekleri
+Yeni Ubuntu sunucusu ve tam parametreler: [INSTALLATION.md](INSTALLATION.md).
+Tüm manuel kurulum/teşhis/test komutları: [docs/COMMANDS.md](docs/COMMANDS.md).
+Dağıtım giriş noktası: [VPS_DEPLOYMENT.md](VPS_DEPLOYMENT.md).
 
-```bash
-PYTHONPATH=src python -m signal_desk.replay.runner --input runtime/data/raw/example.jsonl --output runtime/data/features/example.features.jsonl --config config/config.yaml
-PYTHONPATH=src python -m signal_desk.eod.report --config config/config.yaml --date 2026-10-26
-PYTHONPATH=src python -m signal_desk.storage.manifest --config config/config.yaml --output runtime/data/status/storage_manifest.json
-```
+## Kanıt ve güncel sınır
+- Collector snapshot, 25/1.000-record smoke, süreli continuous ve recovery testleri görüldü.
+- Bir saatlik koşu: 186.898 kayıt, gap/reconnect=0, normal exit ve OOM yok.
+- Scoped raw audit: aynı 186.898 kayıt, hata yok; parity veya exchange completeness değil.
+- Installer testleri sahte Docker ile orchestration testleridir; gerçek installer
+  ve bağımsız temiz host acceptance henüz pending.
+- 24h soak, p99 latency, bounded merged replay parity, veri restore, tam ledger/PnL,
+  ekonomik model kabulü tamamlanmadı. Time Machine yalnız feature sözleşmesi.
 
-Optional local health API without Docker:
-
-```bash
-PYTHONPATH=src python -m signal_desk.api.health_server --host 127.0.0.1 --port 8080
-PYTHONPATH=src ./scripts/healthcheck.sh http://127.0.0.1:8080/health
-```
-
-Optional Binance REST snapshot smoke test. This writes one validated market event to the configured raw path and does not place orders:
-
-```bash
-PYTHONPATH=src python -m signal_desk.collector.binance_collector --mode once --config config/config.yaml
-```
-
-Docker commands to run on a host with Docker installed:
-
-```bash
-docker compose config -q
-docker compose build
-docker compose up -d --wait
-./scripts/healthcheck.sh http://127.0.0.1:8080/health
-```
-
-The skeleton is paper-only. Real execution remains disabled and out of scope.
+Installer yerel komut logu ve sürüm/hash manifest'i üretir. Kurulum geçmişi için
+sunucuya özel kimlik/özel yollar public source'a yazılmaz. PROJECT_STATE.md güncel
+teknik özet; decision_log araştırılmış karar; runtime/install yerel kurulum kanıtıdır.

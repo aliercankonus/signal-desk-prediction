@@ -1,0 +1,11 @@
+.git
+.env
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+runtime
+data
+logs
+config/config.yaml
+

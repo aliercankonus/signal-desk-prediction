@@ -78,3 +78,11 @@
 - Compare expected persisted counts; report incremental file hashes and input changes.
 - Preserve raw data; no event-ID accumulation, full-file list loading or replay claims.
 - Local suite 67 passed and config/schema validation passed; actual host audit pending.
+
+## 2026-10-27 — One-command installation candidate
+
+- Add install/deploy entry points, optional fresh-Ubuntu Docker prerequisites and scoped checkout reuse.
+- Preserve active config/volume; gate build/config/tests/public smoke/API health and write local manifest/logs.
+- Add loopback-default configurable API binding and exclude private runtime/config from build context.
+- Publish portable installation and full generic command catalog; refresh sanitized technical checkpoint.
+- Candidate includes validated PR #3 audit source. Local suite 88 passed; actual installer/clean-host validation pending.

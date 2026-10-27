@@ -1,105 +1,26 @@
-# VPS deployment runbook — v16
+# VPS deployment runbook
 
-Status: paper-only smoke deployment. No exchange API key. No real orders.
+Canonical kurulum: [INSTALLATION.md](INSTALLATION.md).
+Tam manuel komut kataloğu: [docs/COMMANDS.md](docs/COMMANDS.md).
 
-## 0) Prerequisites
-
-- Ubuntu 24.04/22.04 VPS
-- Docker Engine + Docker Compose plugin
-- At least 100 GB disk and 2 GB RAM for the current profile
-- Outbound HTTPS/WSS access to Binance public endpoints
-
-## 1) Upload and unpack
-
+## Mevcut checkout
 ```bash
-mkdir -p ~/signal-desk
-cd ~/signal-desk
-unzip signal-desk-prediction-v16.zip
-cd signal-desk-prediction-v16
+bash scripts/install.sh
 ```
+Repo dışında script'in mutlak yolunu kullanabilir veya --dir ile checkout'u seçebilirsin.
+Çalışan Docker host'unda çalıştır; agent container'ının host'a eriştiğini varsayma.
+Mevcut config/.env ve volume korunur. Script otomatik git reset, prune veya data
+silme yapmaz. Güncelleme için açık --ref seç; Git çakışmaları zorla çözülmez.
 
-## 2) Prepare config
+## Kapsam
+Build → config/schema → pytest → REST snapshot → kısa WS → API --wait/health →
+yerel manifest. Smoke için --no-smoke verilirse veri bağlantısı kabul edilmiş sayılmaz.
+Yalnız API başlatılır; maintenance/collector varsayılanı otomatik açılmaz.
+Yeni kurulumda API loopback'e bağlanır; açık dış bind bilinçli --bind seçimi ister.
 
-```bash
-cp .env.example .env
-mkdir -p config
-cp config/config.example.yaml config/config.yaml
-```
-
-Check these before running:
-
-```bash
-grep -n "execution_enabled" config/config.yaml
-grep -n "symbol" config/config.yaml
-grep -n "maker_bps\|taker_bps" config/config.yaml
-```
-
-Expected:
-
-- `execution_enabled: false`
-- `symbol: BTCUSDT`
-- fees are manually verified before interpreting PnL
-
-## 3) Local package checks on VPS
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-PYTHONPATH=src python -m pytest -q
-PYTHONPATH=src python -m signal_desk.tools.validate_all --config config/config.yaml
-./scripts/preflight.sh
-```
-
-## 4) Docker checks
-
-```bash
-docker compose config -q
-docker compose build
-docker compose up -d api maintenance collector
-docker compose ps
-docker compose logs --tail=100
-./scripts/healthcheck.sh
-```
-
-## 5) Binance public-data smoke tests
-
-REST snapshot only:
-
-```bash
-./scripts/binance_snapshot_smoke.sh config/config.yaml
-```
-
-Short public websocket stream test:
-
-```bash
-MAX_EVENTS=25 ./scripts/binance_stream_smoke.sh config/config.yaml
-```
-
-Expected:
-
-- raw JSONL appears under `runtime/data/raw` if running outside Docker, or under Docker volume if run inside container.
-- collector status is `RUNNING` or `STOPPED` with `max_events_reached`.
-- any gap leads to `RESYNCING`, not silent continuation.
-
-## 6) Resource check
-
-```bash
-docker stats --no-stream
-df -h
-du -sh runtime data logs 2>/dev/null || true
-free -h
-```
-
-## 7) Stop
-
-```bash
-docker compose down
-```
-
-## Current blockers before 24/7 run
-
-- Full live collector service command is not yet enabled by default in compose.
-- Replay parity on real captured data is not yet completed.
-- Full paper ledger/PnL is not yet implemented.
-- EOD is skeleton only.
+## Kabul ve kayıt
+DEPLOY_OK ve runtime/install/run.*/manifest.json yalnız aşamalar geçince oluşur.
+Önceki image kimliği ve komut logu yerelde korunur. Kurulum başarısı 24h collector,
+paper trading, p99, veri restore veya strateji başarısı değildir.
+Mevcut backup/restore/migration script'leri skeleton olarak işaretlidir; doğrulanmış
+restore veya disk genişletmesi yaptığı varsayılmaz. Veri migration'ı ayrı kabul ister.

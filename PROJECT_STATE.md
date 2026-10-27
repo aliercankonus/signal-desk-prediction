@@ -1,101 +1,61 @@
 # Project State
 
-Status: runnable skeleton package updated to v16.
+Updated: 2026-10-27. This is the public technical checkpoint, with no host-specific
+names, paths, container identities, credentials or full operational transcripts.
+Repository: https://github.com/aliercankonus/signal-desk-prediction
 
-## Readiness
+## Scope
+- Binance BTCUSDT spot, paper-only; execution_enabled=false.
+- Default budget: 100GB disk / 2GB RAM. 200GB expansion remains a planned profile.
+- S1 order-flow is the primary research candidate, not proven profitable.
+- Compose collector default remains idle. API readiness is not an ENTER permission.
 
-- Specification readiness: high.
-- G0/G1 local readiness: implemented and locally tested.
-- Collector readiness: bounded 25/1,000-record VPS live smoke passed; optional continuous candidate locally tested, VPS acceptance pending.
-- G3 replay/feature readiness: basic replay and feature snapshots implemented; live/replay parity pending.
-- EOD readiness: skeleton counts implemented; PnL/model evaluation pending.
-- Deployment readiness: user verified API image build, 24 tests and paper-only healthy API on VPS; new continuous collector image/resource limits pending.
-- Paper run readiness: not ready until full ledger, paper executor loop and EOD PnL pass.
-- Live trading readiness: out of scope.
+## Source and implementation
+- Main baseline: 880ed1c8cedca4321087c1b252d529c74f318cbc (continuous collector).
+- Raw-session audit: PR #3 source 1bf9805fdb176e349eb47ac615d35b422b0db1e2;
+  real-data acceptance passed, main merge was blocked pending explicit authorization.
+- This installer candidate is based on that audit commit, so it includes the
+  verified audit feature as well as one-command installation and command docs.
+- Installer: standalone install.sh, existing/fresh checkout handling, optional
+  fresh-Ubuntu Docker prerequisites, deploy gates and secret-free local manifest.
+- Runtime image IDs/config hash/git commit are captured by each successful installer;
+  no exact running image identity is fabricated in this public checkpoint.
 
-## Current hard decisions
+## Evidence
+- Before installer additions, 67 tests passed on the target host.
+- Snapshot, 25/1,000-record and 60/300s collector trials passed.
+- One-hour bounded collector: 186,898 persisted records, zero sequence gaps/reconnects,
+  normal exit and no OOM. Resource snapshots were low; peaks/p99 not measured.
+- Recovery trial: two reconnects, fresh synchronized session, failure counter reset,
+  normal duration stop. Individual generic timeout causes remain not fully attributed.
+- Real raw-session audit: 1 snapshot + 35,887 depth + 151,010 trades, no reported errors.
+- Installer candidate: 88 local tests passed, including mocked Docker orchestration
+  failure/preservation gates and real application checks. Shell syntax/config validated.
+- Actual installer on target host and independent clean-host installation pending.
 
-- V0: Binance BTCUSDT spot paper-only.
-- Runtime: Docker Compose portable deployment.
-- Disk profiles: 100 GB default, 200 GB migration supported.
-- RAM profile: 2 GB.
-- Strategy primary: S1 order-flow continuation.
-- Paper-fill acceptance: conservative mode.
+## Completed vs pending
+| Area | State |
+|---|---|
+| Paper-only API and bounded market-data collection | Implemented; bounded target-host evidence |
+| Session-aware raw consistency audit | Implemented and target-host evidence |
+| One-command installer and full generic command catalog | Candidate implemented; host acceptance pending |
+| Collector retention/compression | Quota/HALT guards only; automatic TTL/archive pending |
+| Live/replay parity and bounded combined replay | Pending; old replay reads full JSONL lists |
+| Backup/restore and second-host data migration | Pending; old scripts remain skeleton |
+| Full paper ledger, EOD PnL and model economics | Pending |
+| Time Machine | Specification only |
+| Real orders | Out of scope, disabled |
 
-## v16 implementation status — 2026-10-26
+## Next task
+Review/test the installer candidate on a Docker host, inspect local install manifest,
+then obtain explicit authorization for its exact main-branch merge.
+One main merge of the installer candidate would also include PR #3's audit source.
+No 24h service or live execution is enabled by creating/merging these source files.
 
-Implemented:
-
-- Config and JSON schema validation tooling.
-- Binance BTCUSDT snapshot/delta/trade mapping utilities.
-- Binance L2 order book state with gap detection.
-- Collector `--mode idle` and `--mode once` REST snapshot smoke mode.
-- Health API returning paper-only status.
-- Conservative paper-fill rules including stop-first behavior.
-- Deterministic minimal Decision Engine skeleton.
-- Basic causal feature engine.
-- Replay runner from raw JSONL events to feature JSONL snapshots.
-- Storage manifest generator.
-- EOD skeleton report generator.
-- Alarm manager.
-- Bootstrap, preflight, healthcheck, backup, restore and 200GB migration scripts.
-
-Local validation performed in the assistant container:
-
-```bash
-PYTHONPATH=src python -m pytest -q
-# 16 passed
-PYTHONPATH=src python -m signal_desk.tools.validate_all --config config/config.example.yaml
-# schemas_ok=14 config_version=cfg-v16-example-001 mode=paper
-PYTHONPATH=src ./scripts/bootstrap.sh
-# bootstrap_ok paper_only=true
-```
-
-Not yet validated: Docker build/compose runtime, live Binance network snapshot, VPS resource limits, long-running collector, live/replay parity, full paper ledger, full EOD PnL/model evaluation.
-
-## Time Machine — 2026-10-27
-
-- Kullanıcı kabulü: replay'den ayrı `timemachine` araştırma feature'ı.
-- Kaynak incelemesi ve BTC uyarlama sözleşmesi: references/16-timemachine.md.
-- Karar: decision_log/2026-10-27-timemachine.md.
-- Durum: specification accepted; implementation, schemas, config wiring and tests pending.
-- Çalışan runtime, replay ve test sayısı değiştirilmedi. VPS kontrolü/smoke hâlâ sıradaki iş.
-
-## VPS evidence and stream bootstrap correction — 2026-10-27
-
-User-reported VPS evidence at /docker/hermes-agent-qbva/data/signal-desk-prediction:
-- Docker API image built; config/schema validation passed with cfg-v16-example-001.
-- Existing test suite: 16 passed in 0.40s; API healthy, paper, execution_enabled=false,
-  ready_for_enter=false. REST snapshot wrote raw events.
-- Live WebSocket smoke FAILED: exit 2, gap_count=1, RESYNCING. Not a feed acceptance.
-- Bootstrap fix now has 24 locally passing tests and config/schema validation.
-- New image build and live retest on VPS pending; no 24h soak or profitability claim.
-- Fix/research source and bounds: decision_log/2026-10-27-binance-stream-bootstrap.md.
-- Continuous reconnect/resync and resource soak are still pending.
-
-## Continuous collector candidate — 2026-10-27
-- User reported VPS bootstrap acceptance: 24 passed; 25 records (19 depth/5 trade)
-  and 1,000 records (275 depth/724 trade), both gap_count=0, exit=0.
-- Bootstrap fix merged to main at 76d00b8 and checked out on VPS.
-- Continuous recovery candidate: local 49-test suite and schema/config validation pass.
-- Added bounded retry/resync, cancellable snapshot requests, storage limits and counters.
-- Config collector section is optional; preserve the user's active config/config.yaml.
-- Compose remains idle. No unattended collector has been started by this change.
-- Next single task: rebuild/test candidate collector on VPS, then bounded 60s run.
-- Pending: actual resource measurements, live fault injection, soak, retention,
-  replay parity, full paper ledger/EOD/model results.
-
-## 2026-10-27 — Stale incident follow-up
-User-reported first continuous VPS run: 817 persisted records (130 depth, 684 trade,
-3 snapshots), gap_count=0, two stale-depth resyncs. Final exit code was not provided.
-Do not accept stability/soak or merge on that output alone.
-Per-event schema reloading/meta-validation was found in the hot path and replaced
-with bounded checked-validator reuse. Instance validation and fsync remain enabled.
-The 2s/3s configured freshness limits and recovery behavior are unchanged.
-Add current-event age, depth receipt/application age, queue high-water, event-loop lag,
-validation and write/IO timing. Keep last failure diagnostics across a later session.
-These measurements separate observed receipt/processing delays; no network root cause
-has been proven. Main remains unchanged.
-Local suite now 53 passed; config/schema validation passed.
-An isolated local 100-event validation benchmark was 0.6502s before vs 0.0203s after;
-this is not an end-to-end or VPS performance claim. VPS rebuild and 60s repeat pending.
+## Records and ownership
+- INSTALLATION.md: canonical repeatable install procedure.
+- docs/COMMANDS.md: all generic manual setup, diagnosis and acceptance commands.
+- decision_log: source research and rationale.
+- runtime/install: private per-install command/output/image/config evidence, ignored
+  by Git and Docker build context.
+- Full actual-host command transcript stays in the user's private installation log.
