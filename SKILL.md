@@ -87,6 +87,16 @@ collector session selected by session_id. Check counts, schemas, sequence and fi
 hashes. The tool must not alter raw files. Do not substitute the old replay reader,
 which loads entire large files into lists. A passing audit is not live/replay parity.
 
+## Controlled host-command gateway
+
+For a containerized agent, follow [INSTALLATION.md](INSTALLATION.md) to prepare
+root-owned host-side forced-command and sudoers files in a separate VPS root
+terminal. The only operations are status, validate and deploy, with no additional
+arguments. The hostname-only SSH authorization remains unchanged until that
+one-time host setup. Never treat command filtering as a sandbox: validation and
+deployment run repository code with host privileges. Preserve the existing Compose
+project, active config and volume; keep paper mode and execution disabled.
+
 ## Portable installation in one operation
 
 Follow [INSTALLATION.md](INSTALLATION.md) and the [command catalog](docs/COMMANDS.md).

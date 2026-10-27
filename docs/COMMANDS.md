@@ -41,6 +41,85 @@ AGENT_CONTAINER=your-agent-container
 docker inspect "$AGENT_CONTAINER" --format 'Network={{.HostConfig.NetworkMode}}{{println}}{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 ```
 
+## Restricted SSH host-command gateway
+
+This is separate from application installation. Review the checkout and
+[INSTALLATION.md](../INSTALLATION.md) before changing host authorization.
+Prerequisites on the VPS: a root terminal; an existing checkout with `.env` and
+`config/config.yaml`; the existing Compose project name from `.env`; a dedicated
+SSH account with **exactly one** active ed25519 authorized key; `sudo`, `visudo`,
+`ssh-keygen`, `runuser`, Git and a working host Docker/Compose installation. Confirm the
+active config remains `mode: paper` and `execution_enabled: false`. Obtain the
+expected SSH-key fingerprint from a trusted copy of the public key, not solely
+from the host's mutable `authorized_keys` file. The current hostname-only key
+cannot install this gateway remotely.
+
+From the existing checkout in the **VPS root terminal**, set host-local values
+and run the one-time installer. Do not commit host identities, key material or
+private settings:
+
+```bash
+REPO="$PWD"
+AGENT_USER=your-dedicated-ssh-user
+KEY_COMMENT=your-public-key-comment
+KEY_FINGERPRINT=SHA256:your-independently-verified-key-fingerprint
+PROJECT=your-existing-COMPOSE_PROJECT_NAME
+EXPECTED_HOST=$(hostname)
+bash scripts/install-host-gateway.sh --repo "$REPO" \
+  --agent-user "$AGENT_USER" --key-comment "$KEY_COMMENT" \
+  --key-fingerprint "$KEY_FINGERPRINT" --project "$PROJECT" \
+  --expected-host "$EXPECTED_HOST"
+```
+
+The script refuses a host/project mismatch, multiple active authorized keys,
+a key fingerprint mismatch, unexpected existing key options (including extra
+`from=` restrictions), missing config or unsafe paper/execution settings. It
+also refuses source/config/Git paths or home ancestors writable by the agent.
+It copies the dispatcher and gateway into root-owned host paths, writes a
+root-owned configuration, validates an exact three-command sudoers file with
+`visudo`, makes the dedicated account's home and SSH files root-owned, then
+atomically replaces the authorized key with a `restrict,command=...` entry.
+Only after the forced key is in place does it publish sudoers privileges.
+Review ownership and existing account files first. If an intermediate step
+fails, inspect the host's partial state; do not assume automatic rollback.
+No application deployment occurs during this one-time setup.
+
+From the agent container, use locally configured host, user, key and pinned
+known-hosts paths (none belong in Git):
+
+```bash
+SSH_HOST=your-reachable-host-or-gateway
+SSH_USER=your-dedicated-ssh-user
+SSH_KEY=/path/to/dedicated-private-key
+SSH_KNOWN_HOSTS=/path/to/pinned-known-hosts
+ssh -T -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+  "$SSH_USER@$SSH_HOST" status
+ssh -T -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+  "$SSH_USER@$SSH_HOST" validate
+ssh -T -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+  "$SSH_USER@$SSH_HOST" deploy
+```
+
+`status` reports the existing Compose project's state. `validate` checks
+Compose, builds the collector image from reviewed source, then runs application
+validation and pytest in disposable containers; `deploy`
+invokes the existing guarded deployment script, which builds, runs bounded
+smoke tests and starts only the API. Run `status` first; only run the others
+after reviewing and committing the exact source revision. Extra words, flags,
+newlines and arbitrary commands are rejected. `validate` and `deploy` refuse
+tracked code changes (except active config) and untracked repository files.
+Neither command enables continuous collection, live execution or a new volume.
+
+**Limitations:** a forced SSH command and exact sudoers entries do not sandbox
+repository code. Docker-backed validation/deployment execute repository inputs
+with host/root privileges. The agent must not own or write the host checkout,
+root-owned gateway files or active key authorization. Review existing sshd
+policy and sudo rights independently; this installer does not revoke them.
+Local mocked checks cannot prove VPS sudoers, sshd, Docker or clean-host restore.
+
 ## Repository and existing settings
 
 ```bash
