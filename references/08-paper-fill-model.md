@@ -1,28 +1,29 @@
 # 08 — Paper Fill Model
 
-Paper-fill modu üçe ayrılır. Kabul kapılarında **conservative** ana moddur.
+Three paper-fill modes are defined. **Conservative** is the primary acceptance mode.
 
-## Modlar
+## Modes
 
-| Mod | Kullanım | Varsayım |
-|---|---|---|
-| Conservative | Kabul ve risk | Şüphede kötü senaryo |
-| Neutral | Günlük normal rapor | Orta varsayım |
-| Optimistic | Duyarlılık analizi | En iyiye yakın ama ayrı etiketli |
+| Mode | Use | Assumption |
+| --- | --- | --- |
+| Conservative | Acceptance and risk | Adverse case when uncertain |
+| Neutral | Normal daily reporting | Middle assumption |
+| Optimistic | Sensitivity analysis | Near-best case, labeled separately |
 
-## Ortak ilkeler
+## Shared principles
 
-- Stop tetiklenmesi gerçek dolum garantisi değildir.
-- Same interval içinde stop ve hedef ikisi de görünürse conservative modda stop-first.
-- Limit emrin dolması iyi işlem yaptığımızı kanıtlamaz; markout ölç.
-- Kısmi dolum miktarı korunur.
-- Cancel isteği cancel onayı değildir.
-- Restart sonrası paper ledger borsadan değil kendi kalıcı kayıtlarından reconcile edilir.
-- Futures/funding/liq varsayımları V0 spot paper için kullanılmaz.
+- A triggered stop does not guarantee an actual fill.
+- If stop and target are both visible within the same interval, conservative mode uses stop-first.
+- A filled limit order does not establish a good trade; measure markout.
+- Preserve partial-fill quantities.
+- A cancel request is not a cancel confirmation.
+- After restart, reconcile the paper ledger against its own persistent records, not the exchange.
+- Do not apply futures/funding/liquidation assumptions to V0 spot paper trading.
 
-## Markout ölçümleri
+## Markout measurements
 
-Her paper fill için:
+For each paper fill:
+
 - fill_time
 - fill_price
 - midpoint at +1s, +5s, +30s, +60s
@@ -31,4 +32,4 @@ Her paper fill için:
 - slippage estimate
 - adverse selection flag
 
-Markout tanı metriğidir; net kâr veya model kabulü değildir.
+Markout is a diagnostic metric, not net profit or model acceptance.

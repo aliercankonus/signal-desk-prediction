@@ -11,11 +11,8 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 - Compose collector default remains idle. API readiness is not an ENTER permission.
 
 ## Source and implementation
-- Main baseline: 880ed1c8cedca4321087c1b252d529c74f318cbc (continuous collector).
-- Raw-session audit: PR #3 source 1bf9805fdb176e349eb47ac615d35b422b0db1e2;
-  real-data acceptance passed, main merge was blocked pending explicit authorization.
-- This installer candidate is based on that audit commit, so it includes the
-  verified audit feature as well as one-command installation and command docs.
+- Main installation/audit baseline: da3729f4bc86ff8f09283b1a190eecc6a37d7eba (PR #4 merged).
+- Raw-session audit from PR #3 is included in main; both PRs are merged.
 - Installer: standalone install.sh, existing/fresh checkout handling, optional
   fresh-Ubuntu Docker prerequisites, deploy gates and secret-free local manifest.
 - Runtime image IDs/config hash/git commit are captured by each successful installer;
@@ -31,14 +28,18 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 - Real raw-session audit: 1 snapshot + 35,887 depth + 151,010 trades, no reported errors.
 - Installer candidate: 88 local tests passed, including mocked Docker orchestration
   failure/preservation gates and real application checks. Shell syntax/config validated.
-- Actual installer on target host and independent clean-host installation pending.
+- Existing target-VPS installer run reported DEPLOY_OK on 2026-10-27: API health
+  status=ok, mode=paper, execution_enabled=false, config=cfg-v16-example-001,
+  collector=idle, smoke=1; local manifest and command log paths were reported.
+- The assistant did not independently inspect that manifest or its exact image IDs.
+- Independent clean-host installation and restore remain pending.
 
 ## Completed vs pending
 | Area | State |
 |---|---|
 | Paper-only API and bounded market-data collection | Implemented; bounded target-host evidence |
 | Session-aware raw consistency audit | Implemented and target-host evidence |
-| One-command installer and full generic command catalog | Candidate implemented; host acceptance pending |
+| One-command installer and full generic command catalog | Implemented; existing-VPS DEPLOY_OK reported; independent clean host pending |
 | Collector retention/compression | Quota/HALT guards only; automatic TTL/archive pending |
 | Live/replay parity and bounded combined replay | Pending; old replay reads full JSONL lists |
 | Backup/restore and second-host data migration | Pending; old scripts remain skeleton |
@@ -47,10 +48,12 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 | Real orders | Out of scope, disabled |
 
 ## Next task
-Review/test the installer candidate on a Docker host, inspect local install manifest,
-then obtain explicit authorization for its exact main-branch merge.
-One main merge of the installer candidate would also include PR #3's audit source.
-No 24h service or live execution is enabled by creating/merging these source files.
+
+Verify authenticated host-command access for the containerized agent before asking
+it to deploy. Then validate independent clean-host installation and restore; build
+a bounded combined depth/trade replay path before claiming live/replay parity.
+The collector remains idle by default. No 24h service or live execution is enabled
+by source-file changes or merges.
 
 ## Records and ownership
 - INSTALLATION.md: canonical repeatable install procedure.
@@ -59,3 +62,8 @@ No 24h service or live execution is enabled by creating/merging these source fil
 - runtime/install: private per-install command/output/image/config evidence, ignored
   by Git and Docker build context.
 - Full actual-host command transcript stays in the user's private installation log.
+
+## Repository language
+
+All project documentation, skills, decision records, comments and user-facing
+runtime messages are maintained in English, independently of conversation language.

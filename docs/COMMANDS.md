@@ -1,17 +1,19 @@
-# Kurulum ve doğrulama komut kataloğu
+# Installation and validation command catalog
 
-Bu dosya şimdiye kadar kullandığımız kurulum/doğrulama adımlarını taşınabilir biçimde
-tutar. Sunucuya özel kimlik/yollar ve ham operasyon çıktıları özel günlükte kalır.
-Komutları baştan sona körlemesine tekrar çalıştırma; normal kurulum INSTALLATION.md
-akışındaki tek installer komutudur. Buradakiler teşhis, kabul ve yeniden üretim içindir.
-Önce gerçek checkout yolunu seç:
+This file preserves the setup/validation steps used so far in a portable form.
+Host-specific identities/paths and raw operational output remain in the private log.
+Do not blindly rerun this catalog from beginning to end. Normal installation uses
+the single installer command in INSTALLATION.md. These commands support diagnostics,
+acceptance and reproduction. First select the actual checkout path:
+
 ```bash
 REPO=/path/to/signal-desk-prediction
 cd "$REPO"
 PROJECT=signal-desk-prediction
 ```
 
-## Host ve Docker erişimi
+## Host and Docker access
+
 ```bash
 hostname
 pwd
@@ -29,14 +31,18 @@ free -h
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
 ss -ltnp '( sport = :8080 )'
 ```
-Daemon/socket yoksa host bağlantısını düzelt; agent container'ına ikinci Docker
-kurmak bu sorunu çözmez. Agent mount teşhisi (adı kullanıcı belirler):
+
+If the daemon/socket is missing, fix host connectivity. Installing a second Docker
+inside the agent container does not solve host access. Inspect agent mounts using
+a user-selected container name:
+
 ```bash
 AGENT_CONTAINER=your-agent-container
 docker inspect "$AGENT_CONTAINER" --format 'Network={{.HostConfig.NetworkMode}}{{println}}{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 ```
 
-## Repo ve mevcut ayarlar
+## Repository and existing settings
+
 ```bash
 git -c safe.directory="$PWD" remote -v
 git -c safe.directory="$PWD" log -1 --oneline
@@ -46,14 +52,18 @@ test -f config/config.yaml || cp config/config.example.yaml config/config.yaml
 grep -n 'config_version' config/config.yaml config/config.example.yaml config.example.yaml
 diff -u config/config.example.yaml config/config.yaml
 ```
-Diff exit=1 farklılık demektir. Aktif config'i örnek dosyayla ezme.
-Geçmişte doğrulanmış yalnız v15/v16 etiket farkının düzeltmesi:
+
+Diff exit=1 means files differ. Do not overwrite active config with an example.
+The historical fix for a verified v15/v16 label-only difference was:
+
 ```bash
 sed -i -e 's/version: v15$/version: v16/' -e 's/config_version: cfg-v15-example-001$/config_version: cfg-v16-example-001/' config/config.yaml
 ```
-Bu geçmiş düzeltme her kurulumda otomatik uygulanacak bir migration değildir.
 
-## Build, config, test ve API
+This historical correction is not an automatic migration for every installation.
+
+## Build, config, tests and API
+
 ```bash
 docker compose -p "$PROJECT" config -q
 docker compose -p "$PROJECT" build api collector
@@ -65,10 +75,12 @@ docker compose -p "$PROJECT" logs --tail=60 api
 curl --fail --show-error http://127.0.0.1:8080/health
 docker compose -p "$PROJECT" exec -T api python -m signal_desk.tools.install_check --health-url http://127.0.0.1:8080/health
 ```
-API başlangıçta health:starting olabilir; up --wait sağlık kontrolünü bekler.
-ready_for_enter=false mevcut eksik model/ledger kapsamıyla uyumludur.
 
-## Snapshot ve kısa stream
+The API may initially show health:starting; up --wait waits for its health check.
+ready_for_enter=false is consistent with the incomplete model/ledger scope.
+
+## Snapshot and short stream
+
 ```bash
 docker compose -p "$PROJECT" run --rm --no-deps collector python -m signal_desk.collector.binance_collector --help
 docker compose -p "$PROJECT" run --rm --no-deps collector python -m signal_desk.collector.binance_collector --mode once --config config/config.yaml
@@ -77,28 +89,36 @@ echo "STREAM_EXIT_CODE=$?"
 docker compose -p "$PROJECT" run --rm --no-deps collector python -u -m signal_desk.collector.binance_collector --mode stream --max-events 1000 --config config/config.yaml
 echo "STREAM_EXIT_CODE=$?"
 ```
-Çıktı ve timeout kodunu tek shell'de yakalamak:
+
+Capture output and timeout status in the same shell:
+
 ```bash
 set -o pipefail
 timeout 60s docker compose -p "$PROJECT" run --rm --no-deps collector python -u -m signal_desk.collector.binance_collector --mode stream --max-events 25 --config config/config.yaml 2>&1 | tee /tmp/signal-desk-stream-smoke.log
 result=${PIPESTATUS[0]}
 echo "STREAM_EXIT_CODE=$result"
 ```
-124 timeout'tur. --rm ile çıkmış container silinir; No such container başarı kanıtı değildir.
-Durum dosyası:
+
+Exit 124 means timeout. --rm removes the exited container; “No such container” does
+not prove success. Read the status file:
+
 ```bash
 docker compose -p "$PROJECT" run --rm --no-deps collector python -c 'from pathlib import Path; print(Path("/data/status/collector_status.json").read_text())'
 ```
 
-## Süreli continuous, kaynak ve soak
-Aynı data volume'unda aynı anda yalnız bir collector çalıştır.
+## Bounded continuous collection, resources and soak
+
+Run only one collector at a time against the same data volume.
+
 ```bash
 docker compose -p "$PROJECT" run --rm --no-deps collector python -u -m signal_desk.collector.binance_collector --mode continuous --max-run-seconds 60 --config config/config.yaml
 echo "CONTINUOUS_EXIT_CODE=$?"
 docker compose -p "$PROJECT" run --rm --no-deps collector python -u -m signal_desk.collector.binance_collector --mode continuous --max-run-seconds 300 --config config/config.yaml
 echo "CONTINUOUS_EXIT_CODE=$?"
 ```
-Arka plan kabul testi, otomatik süre sonu:
+
+Background acceptance test with automatic duration limit:
+
 ```bash
 TEST_CONTAINER=signal-desk-soak-test
 docker compose -p "$PROJECT" run -d --no-deps --name "$TEST_CONTAINER" collector python -u -m signal_desk.collector.binance_collector --mode continuous --max-run-seconds 3600 --config config/config.yaml
@@ -108,12 +128,16 @@ docker inspect "$TEST_CONTAINER" --format 'Memory={{.HostConfig.Memory}} NanoCpu
 docker logs --tail=10 "$TEST_CONTAINER"
 docker inspect "$TEST_CONTAINER" --format 'Status={{.State.Status}} ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} StartedAt={{.State.StartedAt}} FinishedAt={{.State.FinishedAt}}'
 ```
-Çalışırken ExitCode=0 test tamamlandı demek değildir. Normal bitiş: STOPPED,
-max_run_seconds_reached, exited/0/OOMKilled=false. session_synchronized=false
-kapanışta beklenir. docker stats anlık örnektir; max_* sayaçlar p99 değildir.
 
-## Kontrollü recovery
-Yalnız ayrı test collector'ında, diğer servislerin ağını değiştirmeden:
+ExitCode=0 while running does not mean the test has completed. Normal completion is
+STOPPED, max_run_seconds_reached and exited/0/OOMKilled=false.
+session_synchronized=false is expected at shutdown. docker stats is an instantaneous
+sample; max_* counters are not p99 measurements.
+
+## Controlled recovery
+
+Only use a dedicated test collector; do not change other services' networks:
+
 ```bash
 TEST_CONTAINER=your-dedicated-recovery-test
 (
@@ -129,11 +153,14 @@ trap - EXIT
 docker logs --tail=10 "$TEST_CONTAINER"
 docker exec "$TEST_CONTAINER" cat /data/status/collector_status.json
 ```
-Beklenen: retry/backoff, yeni session/book, tekrar RUNNING; stabil ilerleme sonrası
-failure-budget reset. Tüm timeout'ların tek kesintiden geldiğini varsayma.
 
-## Ham veri ve scoped audit
-Collector durduktan sonra:
+Expected behavior: retry/backoff, a new session/book, return to RUNNING, then failure
+budget reset after stable progress. Do not attribute every timeout to one outage.
+
+## Raw data and scoped audit
+
+After the collector stops:
+
 ```bash
 docker compose -p "$PROJECT" run --rm --no-deps collector python -c 'from pathlib import Path; files=sorted(Path("/data/raw").glob("*.jsonl")); print("files=",len(files)); [print(f.name, f.stat().st_size) for f in files]'
 SESSION_ID=your-completed-session-id
@@ -143,13 +170,16 @@ TRADE_COUNT=your-expected-trade-count
 docker compose -p "$PROJECT" run --rm --no-deps collector python -u -m signal_desk.tools.audit_raw --raw-dir /data/raw --session-id "$SESSION_ID" --expected-snapshots "$SNAPSHOTS" --expected-depth "$DEPTH_COUNT" --expected-trades "$TRADE_COUNT"
 echo "AUDIT_EXIT_CODE=$?"
 ```
-Beklenen sayılar ilgili tamamlanmış koşunun çıktısından alınır. Dosyalar birden
-fazla denemeyi içerir; inventory toplamını bir testin hacmi veya günlük hacim sayma.
-SHA-256 yerel dosya fingerprint'idir. Audit başarısı replay parity değildir.
-Mevcut eski replay runner'ı tüm JSONL'yi listeye yükler; büyük dosyaya kontrolsüz uygulama.
 
-## Sürüm güncelleme ve durdurma
-Yalnız incelenmiş ref/branch için:
+Take expected counts from the corresponding completed run. Files include multiple
+trials; total inventory is not the size of one test or a daily volume estimate.
+SHA-256 is a local file fingerprint. Passing audit is not replay parity. The old
+replay runner loads all JSONL into a list; do not apply it to large files without bounds.
+
+## Version updates and stopping
+
+Only use a reviewed ref/branch:
+
 ```bash
 git -c safe.directory="$PWD" fetch origin
 git -c safe.directory="$PWD" switch main
@@ -157,19 +187,23 @@ git -c safe.directory="$PWD" pull --ff-only origin main
 git -c safe.directory="$PWD" log -1 --oneline
 git -c safe.directory="$PWD" status --short
 ```
-Durdurma yalnız bu Compose projesini hedefler, volume'u korur:
+
+Stop only this Compose project, preserving its volume:
+
 ```bash
 docker compose -p "$PROJECT" stop
 ```
-Eski backup/restore/migration script'leri skeleton'dır; temiz host restore kabulü
-yoktur. Veri silme, prune, down -v ve remove-orphans normal kurulum adımı değildir.
 
-## Doğrulanan checkpoint'ler (27 Ekim 2026)
-- 16 → 24 → 49 → 53 test aşamaları; audit adayıyla 67 test target host'ta geçti.
-- Snapshot, 25/1.000 kayıt, 60/300s ve 1h collector koşuları doğrulandı.
-- 1h: 186.898 kayıt, gap/reconnect=0, exited/0/no OOM.
-- Recovery testinde iki reconnect ve yeni sağlıklı oturuma dönüş görüldü.
-- 1h session audit: 1 snapshot + 35.887 depth + 151.010 trade; hata yok, exit 0.
-- Installer eklemeleri yerel sahte-Docker orchestration testlerine sahiptir;
-  gerçek installer ve ayrı temiz sunucu testi henüz pending.
+Old backup/restore/migration scripts are skeletons; clean-host restore has not passed.
+Data deletion, prune, down -v and remove-orphans are not normal installation steps.
 
+## Verified checkpoints (2026-10-27)
+
+- Test stages progressed through 16 → 24 → 49 → 53; the audit candidate passed 67 target-host tests.
+- Snapshot, 25/1,000-record, 60/300s and 1h collector runs were validated.
+- 1h: 186,898 records, zero gaps/reconnects, exited/0/no OOM.
+- Recovery test: two reconnects and return to a fresh healthy session.
+- 1h session audit: 1 snapshot + 35,887 depth + 151,010 trades; no errors, exit 0.
+- Installer additions have local fake-Docker orchestration tests; 88 local tests passed.
+- The existing-VPS installer run returned DEPLOY_OK with paper-only API health.
+  Independent clean-server installation remains pending.

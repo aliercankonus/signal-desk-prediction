@@ -1,33 +1,33 @@
 # 02 — Data Contract and Schemas
 
-Bu dosya hangi veri tiplerinin kalıcı tutulacağını tanımlar. JSON schema dosyaları `schemas/` altındadır.
+JSON schemas are in `schemas/`. This file defines which data types are persisted.
 
-## Dosya / tablo aileleri
+## Contracts
 
-| Contract | Amaç |
-|---|---|
-| `market_event` | Binance trade/book/snapshot/delta/heartbeat olayları |
-| `feature_snapshot` | O anda bilinen nedensel feature seti |
-| `prediction` | Model çıktısı ve model sürümü |
-| `decision` | Decision Engine sonucu |
-| `order_intent` | Paper emir niyeti ve idempotency anahtarı |
-| `paper_fill` | Paper dolum sonucu |
-| `eod_report` | Günlük özet ve revision |
-| `risk_state` | Günlük risk, açık risk ve latch durumu |
-| `model_manifest` | Model artifact ve veri/protokol ilişkisi |
-| `run_manifest` | Replay/training/paper run kimliği |
+| Contract | Purpose |
+| --- | --- |
+| `market_event` | Binance trade/book/snapshot/delta/heartbeat events |
+| `feature_snapshot` | Causal features known at that time |
+| `prediction` | Model output and version |
+| `decision` | Decision Engine result |
+| `order_intent` | Paper order intent and idempotency key |
+| `paper_fill` | Paper fill result |
+| `risk_state` | Daily risk, open risk and latch state |
+| `eod_report` | Daily summary and revision |
+| `model_manifest` | Model artifact and data/protocol relationship |
+| `run_manifest` | Replay/training/paper run identity |
 
-## Değişmez veri ilkeleri
+## Immutable data principles
 
-- Raw events append-only tutulur.
-- Zamanlar UTC ISO-8601 + exchange timestamp + local receive monotonic delta ile saklanır.
-- Aynı fiyattaki farklı olaylar birleştirilmez.
-- Duplicate tespiti olay kimliği/sequence/hash ile yapılır.
-- Feature snapshot yalnız o anda bilinen veriden üretilir.
-- EOD summary eğitim feature'ının yerine geçmez.
+- Raw events are append-only.
+- Store UTC ISO-8601 time, exchange timestamp and local receive monotonic delta.
+- Do not merge different events at the same price.
+- Detect duplicates by event identity/sequence/hash.
+- Generate feature snapshots only from data known at that time.
+- EOD summaries do not replace training features.
 
-## Binance için dikkat
+## Binance considerations
 
-- BTCUSDT ürün türü config’te açık olmalıdır: `spot` veya ileride ayrı deney olarak `futures`.
-- V0 varsayılanı spot/paper kavramına göre yazılır; futures fonlama/likidasyon hesabı V0 varsayılanı değildir.
-- Tick size, lot size, min notional, fee ve stream türü başlangıçta doğrulanmalıdır.
+- Specify BTCUSDT product type in config: `spot`, or `futures` in a separate future experiment.
+- V0 defaults describe spot/paper behavior; futures funding/liquidation calculations are not V0 defaults.
+- Verify tick size, lot size, minimum notional, fees and stream type at startup.

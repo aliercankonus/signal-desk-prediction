@@ -86,3 +86,12 @@
 - Add loopback-default configurable API binding and exclude private runtime/config from build context.
 - Publish portable installation and full generic command catalog; refresh sanitized technical checkpoint.
 - Candidate includes validated PR #3 audit source. Local suite 88 passed; actual installer/clean-host validation pending.
+
+## 2026-10-27 — English repository documentation and installation follow-up
+
+- Translate repository skills, setup guides, research contracts and decision records
+  to English; keep identifiers, commands and contract semantics unchanged.
+- Require English for future repository documentation, comments and runtime messages,
+  independently of the user's conversation language.
+- Record the approved installer/audit merge and user-reported existing-VPS DEPLOY_OK.
+- Independent clean-host installation, restore and full paper-readiness gates remain pending.

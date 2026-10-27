@@ -1,26 +1,32 @@
 # VPS deployment runbook
 
-Canonical kurulum: [INSTALLATION.md](INSTALLATION.md).
-Tam manuel komut kataloğu: [docs/COMMANDS.md](docs/COMMANDS.md).
+Canonical installation: [INSTALLATION.md](INSTALLATION.md).
+Full manual command catalog: [docs/COMMANDS.md](docs/COMMANDS.md).
 
-## Mevcut checkout
+## Existing checkout
+
 ```bash
 bash scripts/install.sh
 ```
-Repo dışında script'in mutlak yolunu kullanabilir veya --dir ile checkout'u seçebilirsin.
-Çalışan Docker host'unda çalıştır; agent container'ının host'a eriştiğini varsayma.
-Mevcut config/.env ve volume korunur. Script otomatik git reset, prune veya data
-silme yapmaz. Güncelleme için açık --ref seç; Git çakışmaları zorla çözülmez.
 
-## Kapsam
-Build → config/schema → pytest → REST snapshot → kısa WS → API --wait/health →
-yerel manifest. Smoke için --no-smoke verilirse veri bağlantısı kabul edilmiş sayılmaz.
-Yalnız API başlatılır; maintenance/collector varsayılanı otomatik açılmaz.
-Yeni kurulumda API loopback'e bağlanır; açık dış bind bilinçli --bind seçimi ister.
+Outside the repository, use the script's absolute path or select the checkout with
+--dir. Run on a Docker host; do not assume an agent container has host access.
+Existing config/.env and the volume are preserved. The script does not reset Git,
+prune or delete data. Select --ref explicitly for an update; Git conflicts are not
+force-resolved.
 
-## Kabul ve kayıt
-DEPLOY_OK ve runtime/install/run.*/manifest.json yalnız aşamalar geçince oluşur.
-Önceki image kimliği ve komut logu yerelde korunur. Kurulum başarısı 24h collector,
-paper trading, p99, veri restore veya strateji başarısı değildir.
-Mevcut backup/restore/migration script'leri skeleton olarak işaretlidir; doğrulanmış
-restore veya disk genişletmesi yaptığı varsayılmaz. Veri migration'ı ayrı kabul ister.
+## Scope
+
+Build → config/schema → pytest → REST snapshot → short WS stream → API --wait/health
+→ local manifest. Selecting --no-smoke does not establish feed acceptance.
+Only the API starts; maintenance/collector services are not enabled automatically.
+A new installation binds the API to loopback; external binding requires an explicit
+--bind choice.
+
+## Acceptance and records
+
+DEPLOY_OK and runtime/install/run.*/manifest.json are produced only after all stages
+pass. Previous image identity and command logs remain local. Installation success
+is not proof of 24h collection, paper trading, p99 latency, data restore or strategy
+success. Existing backup/restore/migration scripts are skeletons; do not assume
+verified restore or disk expansion. Data migration needs separate acceptance.

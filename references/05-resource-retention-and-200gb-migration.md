@@ -1,8 +1,8 @@
 # 05 — Resource, Retention and 200 GB Migration
 
-## Başlangıç profili: 100 GB disk / 2 GB RAM
+## Initial profile: 100 GB disk / 2 GB RAM
 
-| Alan | Bütçe |
+| Area | Budget |
 |---|---:|
 | Raw Zstd events | 30 GB |
 | Feature/label data | 12 GB |
@@ -14,9 +14,9 @@
 | Emergency reserve | 20 GB |
 | Spare | 5 GB |
 
-## 200 GB profili
+## 200 GB profile
 
-| Alan | 100 GB | 200 GB |
+| Area | 100 GB | 200 GB |
 |---|---:|---:|
 | Raw Zstd events | 30 GB | 90 GB |
 | Feature/labels | 12 GB | 24 GB |
@@ -28,45 +28,45 @@
 | Emergency reserve | 20 GB | 25 GB |
 | Spare | 5 GB | 2 GB |
 
-## Migration tetikleyicileri
+## Migration triggers
 
-200 GB’a geçiş öner veya zorunlu hale getir:
+Recommend or require migration to 200 GB when:
 
-- 3 gün üst üste sıkıştırılmış raw veri > 1 GB/gün.
-- 60 günlük raw replay isteniyorsa.
-- Disk >70% nedeniyle yeni deneyler erteleniyorsa.
-- Feature/label pin’leri raw retention’ı 7 gün altına düşürüyorsa.
-- Backtest için aynı anda raw + feature + replay temp alanı 100 GB profilini zorluyorsa.
+- Compressed raw data exceeds 1 GB/day for three consecutive days.
+- 60-day raw replay is required.
+- Disk usage above 70% delays new experiments.
+- Feature/label pins reduce raw retention below seven days.
+- Concurrent raw, feature and replay temporary storage for backtests strains the 100 GB profile.
 
-## Disk alarm aksiyonları
+## Disk actions
 
-| Eşik | Aksiyon |
-|---|---|
-| >70% | Yeni büyük araştırma başlatma; retention raporu üret |
-| >85% | ENTER BLOCK; yeni giriş yok |
-| >90% | Maintenance mode; cleanup/backup doğrula |
-| >95% | HALT; collector dışında riskli yazıcıları durdur veya read-only moda al |
+| Threshold | Action |
+| --- | --- |
+| >70% | Do not start large research jobs; produce a retention report |
+| >85% | ENTER BLOCK; no new entries |
+| >90% | Maintenance mode; verify cleanup/backup |
+| >95% | HALT; stop risky writers other than the collector, or make them read-only |
 
-## RAM kuralları
+## RAM rules
 
-- Redis başlangıçta yok.
-- Toplam live cache en fazla 64 MiB.
-- Engine container hedef RSS ≤512 MiB.
+- No Redis initially.
+- Total live cache at most 64 MiB.
+- Engine container target RSS ≤512 MiB.
 - API ≤192 MiB.
-- Tek bakım worker ≤384 MiB.
-- Ağır eğitim VPS dışında yapılır.
-- Docker container memory limits preflight’ta doğrulanır.
+- One maintenance worker ≤384 MiB.
+- Heavy training runs outside the VPS.
+- Verify Docker container memory limits during preflight.
 
 ## 100 → 200 GB migration runbook
 
-1. HALT gerektirmeyen maintenance window seç.
-2. Backup al: config, schemas, SQLite ledger, manifests, model artifacts, latest raw index.
-3. Backup hashlerini storage_manifest’e yaz.
-4. VPS disk genişlet; filesystem büyütme adımını host sağlayıcıya göre yap.
-5. `preflight.sh --profile 200gb_2gb` çalıştır.
-6. `config.yaml` resource profile değerini güncelle ve yeni config_version üret.
-7. Docker volumes/pathleri değişmeden büyümeyi doğrula.
-8. `docker compose up -d --wait`.
-9. Raw/feature/model/ledger manifest hash kontrolü.
-10. Replay smoke test + EOD idempotency test.
-11. Disk alarm thresholdleri yeni profile göre doğrula.
+1. Select a maintenance window that does not require HALT.
+2. Back up config, schemas, SQLite ledger, manifests, model artifacts and latest raw index.
+3. Record backup hashes in storage_manifest.
+4. Expand the VPS disk; use the host provider's filesystem expansion procedure.
+5. Run `preflight.sh --profile 200gb_2gb`.
+6. Update the resource profile in `config.yaml` and create a new config_version.
+7. Verify expansion without changing Docker volumes/paths.
+8. Run `docker compose up -d --wait`.
+9. Verify raw/feature/model/ledger manifest hashes.
+10. Run replay smoke and EOD idempotency tests.
+11. Verify disk alarm thresholds against the new profile.

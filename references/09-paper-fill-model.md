@@ -1,38 +1,39 @@
 # 09 — Paper Fill Model
 
-Paper-fill gerçek fill değildir. Her fill kaydı mode, assumption, fee, slippage ve markout alanlarını taşır.
+A paper fill is not a real fill. Every record includes mode, assumptions, fees,
+slippage and markout fields.
 
-## Modlar
+## Modes
 
-| Mod | Amaç |
-|---|---|
-| `conservative` | Kabul kapılarında ana mod; şüphede kötü senaryo |
-| `neutral` | Normal analiz raporu; makul ama garantisiz varsayım |
-| `optimistic` | Duyarlılık analizi; başarı iddiasında kullanılmaz |
+| Mode | Purpose |
+| --- | --- |
+| `conservative` | Primary acceptance mode; adverse case when uncertain |
+| `neutral` | Normal analysis; reasonable but unguaranteed assumptions |
+| `optimistic` | Sensitivity analysis; not used for success claims |
 
-## Conservative kurallar
+## Conservative rules
 
-- Marketable olmayan limit entry için yalnız touch yeterli değildir; yeterli karşı taraf trade volume veya queue proxy gerekir.
-- Aynı interval içinde hem stop hem target görülürse stop-first.
-- Spread crossing varsa taker fee + conservative slippage uygulanır.
-- Partial fill desteklenir; unfilled qty açık risk olarak kalır veya expires_at sonrası cancel edilir.
-- Veri stale/gap ise yeni fill yazılmaz.
+- A touch alone is insufficient for a nonmarketable limit entry; require enough opposing trade volume or a queue proxy.
+- If stop and target both occur within the same interval, use stop-first.
+- For spread crossing, apply taker fees and conservative slippage.
+- Support partial fills; unfilled quantity remains open risk or is cancelled after expires_at.
+- Do not record new fills when data is stale or gapped.
 
-## Neutral kurallar
+## Neutral rules
 
-- Touch + yeterli volume proxy ile kısmi fill kabul edilebilir.
-- Stop/target ordering event sequence ile biliniyorsa sequence kullanılır; bilinmiyorsa conservative fallback.
-- Slippage measured spread/volatility modelinden gelir.
+- A touch plus sufficient volume proxy may support a partial fill.
+- Use event sequence for stop/target ordering when known; otherwise fall back to conservative behavior.
+- Derive slippage from a measured spread/volatility model.
 
-## Optimistic kurallar
+## Optimistic rules
 
-- Touch durumunda fill kabul edilebilir.
-- Stop/target ambiguity target-first olamaz; en fazla neutral sequence veya mid assumption.
-- Raporlarda “not for acceptance” etiketi zorunludur.
+- A touch may be accepted as a fill.
+- Stop/target ambiguity must not become target-first; at most use neutral sequence or a middle assumption.
+- Reports must carry the label “not for acceptance”.
 
 ## Markout
 
-Her fill için midpoint markout ölçülür:
+Measure midpoint markout for each fill at:
 
 - 1s
 - 5s
@@ -40,10 +41,10 @@ Her fill için midpoint markout ölçülür:
 - 60s
 - 300s
 
-Amaç: fill sonrası fiyat davranışıyla adverse selection tanısı koymak. Markout net PnL yerine geçmez.
+Use post-fill price behavior to diagnose adverse selection. Markout does not replace net PnL.
 
-## Cancel race ve restart
+## Cancel race and restart
 
-- Cancel request sonrası geç fill gelebilir; fazla satış engellenir.
-- Restart sonrası ledger reconcile bitmeden yeni ENTER yoktur.
-- Partial fill cumulative qty ve remaining qty saklanır.
+- Late fills may arrive after cancel requests; prevent overselling.
+- No new ENTER until ledger reconciliation completes after restart.
+- Persist cumulative and remaining quantities for partial fills.

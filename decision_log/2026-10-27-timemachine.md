@@ -1,25 +1,49 @@
-# Decision: Time Machine ayrı araştırma feature'ı
+# Decision: Time Machine as a separate research feature
 
 ## Status
-accepted — feature sözleşmesi; implementation pending. 2026-10-27.
+
+Accepted feature contract; implementation pending. 2026-10-27.
 
 ## Context
-Kullanıcı Time Machine'in skill'lere eklenmesini ve mevcut replay'den ayrı feature olmasını istedi.
+
+The user requested Time Machine in the skills as a feature separate from existing replay.
 
 ## Sources checked
-2026-10-27 tarihinde Jakeschincariol/day-trader-skill commit 3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd altındaki trader-timemachine/SKILL.md, timemachine.py, tests/test_timemachine.py ve LICENSE incelendi. Sabit sürüm bağlantıları references/16-timemachine.md içinde. Kaynak testleri burada çalıştırılmadı.
+
+On 2026-10-27, reviewed trader-timemachine/SKILL.md, timemachine.py,
+tests/test_timemachine.py and LICENSE at Jakeschincariol/day-trader-skill commit
+3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd. Pinned links are in
+references/16-timemachine.md. Source tests were not run here.
 
 ## Decision
-references/16-timemachine.md sözleşmesini kabul et. Sentetik senaryo ve gerçek geçmiş kural değerlendirmesini ayır. Kaynak bağımsız bar yöntemini referans olarak etiketle; block bootstrap henüz seçilmiş yöntem değildir. BTC 7/24 UTC, yalnız point-in-time veri, açık maliyetler ve stop gap'lerini uygula. Config/şemalar ve src/signal_desk/timemachine ileride uygulanacak; bugün runtime eklenmedi.
+
+Accept references/16-timemachine.md. Separate synthetic scenarios from real
+historical-rule evaluation. Label the source's independent-bar method as a reference;
+block bootstrap is not yet selected. Apply BTC 24/7 UTC, point-in-time data, explicit
+costs and stop gaps. Config/schemas and src/signal_desk/timemachine are future work;
+no runtime was added by this decision.
 
 ## Alternatives
-Replay runner'ını simülasyona dönüştürmek reddedildi: farklı görevler. ABD seansı/Yahoo/ORB varsayımlarını değişmeden almak reddedildi. Monte Carlo oranını kalibre tahmin veya canlı risk vetosu yapmak reddedildi.
+
+Rejected converting the replay runner into simulation: they serve different purposes.
+Rejected unchanged US-session/Yahoo/ORB assumptions and treating Monte Carlo ratios
+as calibrated predictions or live risk vetoes.
 
 ## Risks
-Bağımsız bar örnekleme seri bağımlılığı bozabilir; 10.000 yol 10.000 bağımsız piyasa gözlemi değildir. 5m OHLC 60s hedefi veya L2 S1 geçmişini kanıtlamaz. Kaynak −1R stop varsayımı gap maliyetini gizler. Her biri yeni sözleşmede açık kısıt/test olarak işlendi.
+
+Independent-bar sampling may break serial dependence; 10,000 paths are not 10,000
+independent market observations. Five-minute OHLC cannot establish a 60s target or
+historical L2 S1 results. The source's −1R stop assumption hides gap costs. Each is
+addressed explicitly by constraints/tests in the contract.
 
 ## Tests added
-Çalışan test eklenmedi; belge değişikliği. references/16-timemachine.md içindeki kabul senaryoları uygulama öncesi gereksinimdir. Bu güncelleme için referans/link, mevcut skill frontmatter ve uzak içerik bütünlüğü doğrulanır. VPS/Docker/simülasyon başarısı iddia edilmez.
+
+Documentation only; no executable tests added. Acceptance scenarios in
+references/16-timemachine.md are implementation requirements. Verify references,
+links, existing skill frontmatter and remote content integrity for this update.
+No VPS, Docker or simulation success is claimed.
 
 ## Rollback
-Time Machine referansı ve bölümünü geri al; replay/risk/collector koduna dokunulmadığı için veri veya runtime migration gerekmez.
+
+Revert the Time Machine reference/section. No data/runtime migration is required,
+because replay, risk and collector code are unchanged.

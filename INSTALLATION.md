@@ -1,94 +1,114 @@
-# Tek işlemle kurulum
+# Installation in one operation
 
-## Mevcut checkout
-VPS'nin ana terminalinde, repo içinden:
+## Existing checkout
+
+From the repository directory in the VPS host terminal:
+
 ```bash
 bash scripts/install.sh
 ```
-Başka dizindeyken:
+
+From another directory:
+
 ```bash
 bash /path/to/signal-desk-prediction/scripts/install.sh
 ```
-Mevcut checkout kullanılır; yeniden clone veya otomatik branch değiştirme yapılmaz.
-Başka ref'e açık güncelleme:
+
+The existing checkout is reused; it is not recloned and its branch is not changed
+automatically. To explicitly select another ref:
+
 ```bash
 bash scripts/install.sh --ref COMMIT_SHA
 ```
-Ref güncellemesi kod değişiklikleri varsa durur. Yerel config dosyası checkout ile
-çakışırsa Git durur; config sıfırlanmaz ve force/reset kullanılmaz.
 
-## Yeni Ubuntu sunucusu
-Desteklenen otomatik Docker kurulumu: Ubuntu 22.04/24.04, root/sudo, systemd host.
-Docker mevcutsa çalışan engine'e yeniden kurulum/servis restart'ı yapılmaz.
-Aşağıdaki tek shell işlemi, önce dosyanın tamamen indirilmesini bekler:
+Ref updates stop if code changes are present. Git stops if a checkout conflicts
+with active config; config is not reset and no force/reset is used.
+
+## New Ubuntu server
+
+Automatic Docker prerequisites support Ubuntu 22.04/24.04, root/sudo and a systemd
+host. A working Docker engine is not reinstalled or restarted.
+The following single shell operation downloads the full script before executing it:
+
 ```bash
 sudo bash -c 'set -eu; command -v curl >/dev/null || { apt-get update; apt-get install -y ca-certificates curl; }; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL https://raw.githubusercontent.com/aliercankonus/signal-desk-prediction/main/scripts/install.sh -o "$f"; bash "$f" --install-docker'
 ```
-Varsayılan hedef /opt/signal-desk-prediction. Özel hedef/ref için indirilen script'e
-`--dir /chosen/path --ref COMMIT_SHA` ver. Script repo içindeyse mevcut yolunu bulur.
-Tekrarlanabilir kod sürümü için branch yerine tam commit SHA tercih et.
-Docker/OS paketleri ve temel image tag'i bit düzeyinde sabitlenmiş değildir;
-gerçek git/image/config/Python/dependency sürümleri yerel manifest'e kaydedilir.
 
-## Sıra ve başarı ölçütü
-1. Host/container ve opsiyonel expected-host kontrolü.
-2. Docker daemon, Compose, Buildx ve --wait desteği; Git ve başlangıç kapasitesi.
-3. Mevcut repo kimliğini doğrula veya boş hedefe clone et.
-4. Config/.env yoksa oluştur; aktif dosyaları koru. Taze clone'un versioned config
-   örneğini güncel config.example.yaml ile başlat.
-5. Compose doğrula, api/collector image build et.
-6. Config/schema doğrula ve tüm pytest setini container içinde çalıştır.
-7. Varsayılan olarak public Binance snapshot + 25-record stream smoke.
-8. Yalnız API'yi --wait ile başlat; paper/disabled execution/BTCUSDT health'ini doğrula.
-9. Yerel manifest ve komut günlüğü yaz; DEPLOY_OK ver.
+The default destination is /opt/signal-desk-prediction. For another path/ref, pass
+`--dir /chosen/path --ref COMMIT_SHA` to the downloaded script. When run from a
+checkout, the script finds its existing location. Prefer a full commit SHA over a
+branch for repeatable code versions. Docker/OS packages and base image tags are not
+bit-for-bit locked; actual Git/image/config/Python/dependency identities are recorded
+in the local manifest.
 
-Bir adım başarısızsa sonrakine geçmez. Çalışan collector varsa deployment başlamaz.
-Installer devamlı collector/maintenance açmaz; API ve kısa test kurulumu tamamlanır.
-1h/24h soak, data/replay parity, model/ledger/PnL veya Time Machine kurulmuş sayılmaz.
-Kısa smoke gerektirmeyen kapalı ağ testinde `--no-smoke` kullanılabilir; manifest
-bunu açıkça smoke_skipped olarak kaydeder, live feed kabulü üretmez.
+## Sequence and success criteria
 
-## Config, port ve proje
-Yeni kurulumda API varsayılanı 127.0.0.1:8080'dir. Dış erişim gerekiyorsa bilinçli
-olarak --bind 0.0.0.0 seç; TLS/auth yapılandırması bu installer'ın kapsamı değildir.
+1. Host/container and optional expected-host checks.
+2. Docker daemon, Compose, Buildx and --wait support; Git and bootstrap capacity.
+3. Verify the existing repository identity or clone into an empty destination.
+4. Create missing config/.env; preserve active files. Initialize a fresh clone's
+   versioned config from the current config.example.yaml.
+5. Validate Compose and build api/collector images.
+6. Validate config/schemas and run the full pytest suite inside a container.
+7. By default, run a public Binance snapshot and 25-record stream smoke test.
+8. Start only the API with --wait; verify paper mode, disabled execution and BTCUSDT health.
+9. Write a local manifest and command log; report DEPLOY_OK.
+
+Stop on failure before proceeding to later stages. Deployment stops if a collector
+for this project is running. The installer does not enable continuous collection
+or maintenance; it completes API installation and short checks. It does not establish
+1h/24h soak, data/replay parity, model/ledger/PnL or Time Machine acceptance.
+Use `--no-smoke` for closed-network tests that do not require live smoke; the manifest
+explicitly records smoke_skipped and does not establish live-feed acceptance.
+
+## Config, port and project
+
+A new installation binds to 127.0.0.1:8080. Explicitly choose --bind 0.0.0.0 if external
+access is required; TLS/auth setup is outside the installer's scope.
+
 ```bash
 bash scripts/install.sh --project signal-desk-prediction --port 8080 --bind 127.0.0.1
 bash scripts/install.sh --expected-host EXPECTED_HOSTNAME
 bash scripts/install.sh --plan
 ```
-Mevcut .env'deki proje/port/bind farklıysa sessizce değiştirilmez; eşleşen flag ver
-veya dosyayı bilinçli düzenle. Diğer .env satırları ve config/config.yaml korunur.
-COMPOSE_PROJECT_NAME değişikliği başka Docker volume namespace'i seçebilir;
-aynı veriyi kullanmak için önceki proje adını koru.
 
-Minimum bootstrap kontrolü 10 GiB boş alan ve en az 1.5 GiB görünür MemTotal'dir;
-bu 100GB/2GB profilinin veya istenen retention süresinin kapasite garantisi değildir.
-Gerçek veri path'indeki quota/disk HALT kontrolleri collector'a aittir.
+If existing .env project/port/bind settings differ, they are not silently changed;
+pass matching flags or deliberately edit the file. Other .env lines and
+config/config.yaml are preserved. Changing COMPOSE_PROJECT_NAME may select another
+Docker volume namespace; retain the old project name to use the same data.
 
-## Kaydedilen kurulum kanıtı
-`runtime/install/run.*/` altında:
-- deploy.log: uygulanan komutlar, stdout/stderr, aşama ve hata.
-- git-commit.txt ve config.sha256.
-- previous-api-image.txt: önceki API varsa image ID.
-- manifest.json: yalnız tüm aşamalar geçince atomik finalize edilir; çözülmüş image
-  ID'leri, dependency sürümleri, config hash'i, Compose proje/volume ve smoke durumu.
+Bootstrap requires 10 GiB free space and at least 1.5 GiB visible MemTotal. These are
+not proof of the 100GB/2GB profile's capacity or a retention-duration guarantee.
+The collector owns quota/disk HALT checks on the actual data path.
 
-Bu dosyalar yerel operasyon kaydıdır; .env içeriği basılmaz ve runtime/.env/aktif
-config Docker build context'inden dışlanır. Public repo'ya otomatik upload yapılmaz.
-Mevcut Docker data volume'u korunur; down -v, prune, reset ve remove-orphans kullanılmaz.
-Başarısız API health sonrası otomatik image rollback yapılmaz; log ve önceki image
-ID korunur. Önceki image'a dönmek veya data restore ayrı, incelenecek işlemlerdir.
+## Installation evidence
 
-## Sınırlar
-- Hermes/başka agent container'ından host Docker erişimi varmış gibi davranma.
-- Otomatik Docker setup mevcut/conflicting container runtime'ı kaldırmaz.
-- Çalışan Docker'da eksik Compose/Buildx varsa engine'i değiştirmek yerine durur.
-- Root clone/install ile başka kullanıcıların ownership'i topluca değiştirilmez;
-  Git safe.directory istisnası yalnız tek komuta uygulanır.
-- Backup/restore ve 200GB taşıma eski skeleton script'leri doğrulanmış veri taşıma
-  yöntemi değildir. Tek komut kurulum, geçmiş data/model geri yükleme kabulü değildir.
-- Shell orchestration sahte Docker ile yerel testlidir; gerçek target installer
-  koşusu ve bağımsız temiz sunucu kurulumu ayrıca doğrulanmalıdır.
+Each `runtime/install/run.*/` directory contains:
 
-Tüm manuel kurulum/teşhis/doğrulama komutları için [komut kataloğu](docs/COMMANDS.md).
+- deploy.log: executed commands, stdout/stderr, stages and errors.
+- git-commit.txt and config.sha256.
+- previous-api-image.txt: previous API image ID, if present.
+- manifest.json: atomically finalized only after all stages pass; resolved image IDs,
+  dependency versions, config hash, Compose project/volume and smoke status.
 
+These are local operational records. The .env contents are not printed;
+runtime/.env/active config are excluded from the Docker build context. No automatic
+upload to the public repository occurs. Existing Docker data volumes are preserved;
+no down -v, prune, reset or remove-orphans is used. API health failure does not
+automatically roll back images; logs and the previous image ID are retained.
+Returning to a previous image or restoring data requires separate review.
+
+## Limitations
+
+- Do not assume host Docker access from Hermes or another agent container.
+- Automatic Docker setup does not remove conflicting/existing container runtimes.
+- Missing Compose/Buildx on a working Docker host causes a stop rather than engine replacement.
+- Root clone/install does not change other users' ownership recursively; Git safe.directory is scoped to one command.
+- Existing backup/restore and 200GB migration scripts are skeletons, not verified
+  data-transfer procedures. Installation does not establish data/model restore acceptance.
+- Shell orchestration has local fake-Docker coverage. The user reported DEPLOY_OK
+  from the existing target VPS on 2026-10-27. Independent clean-server installation
+  and restore still require separate validation.
+
+See the [command catalog](docs/COMMANDS.md) for all manual setup, diagnostic and
+validation commands.

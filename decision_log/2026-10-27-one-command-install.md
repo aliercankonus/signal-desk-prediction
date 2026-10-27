@@ -58,3 +58,12 @@ Do not execute/merge the installer candidate until reviewed. Source rollback lea
 raw volumes untouched. Existing runtime rollback is manual using recorded image
 identity/config; database/data restore is outside this candidate.
 
+
+## Follow-up — 2026-10-27
+
+The user explicitly approved the merge. PR #4 merged to main at
+da3729f4bc86ff8f09283b1a190eecc6a37d7eba, including PR #3's raw audit source.
+The user then supplied an existing-VPS DEPLOY_OK result, strict paper-only API
+health, collector=idle, smoke=1 and local manifest/log paths. This is target-host
+installation evidence, not independent clean-host/restore acceptance. Earlier
+pending statements above describe the candidate at decision time.

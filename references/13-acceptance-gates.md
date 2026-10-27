@@ -1,9 +1,9 @@
 # 13 — Acceptance Gates
 
-## Kapılar
+## Gates
 
-| Gate | Çıktı |
-|---|---|
+| Gate | Output |
+| --- | --- |
 | G0 | Scope/config/project state |
 | G1 | Docker skeleton |
 | G2 | Binance BTCUSDT collector |
@@ -16,30 +16,30 @@
 
 ## Fault tests
 
-- Engine `FLAT` iken kill → recover flat.
-- `PENDING_SEND` sonrası kill → duplicate intent yok.
-- Partial fill + cancel race → filled qty korunur.
+- Kill while engine is `FLAT` → recover flat.
+- Kill after `PENDING_SEND` → no duplicate intent.
+- Partial fill + cancel race → preserve filled quantity.
 - L2 stale → ENTER BLOCK.
 - Trade stale → ENTER BLOCK.
-- Fee stale → ENTER BLOCK veya stress fee.
+- Fee stale → ENTER BLOCK or stress fee.
 - Ledger write failure → HALT.
 - Disk 85% → ENTER BLOCK.
 - Disk 95% → HALT.
-- Stop + TP aynı interval → conservative stop-first.
-- Snapshot öncesi buffer isteği → açık hata; sıfır doldurma yok.
-- EOD tekrar çalıştırma → revision, duplicate sonuç yok.
-- 200GB migration → hash/manifest korunur.
+- Stop + TP in the same interval → conservative stop-first.
+- Buffer requested before snapshot → explicit error, no zero-fill.
+- EOD rerun → revision, no duplicate result.
+- 200GB migration → preserve hashes/manifests.
 
-## Başarı ayrımları
+## Separate success claims
 
-Ayrı ayrı raporla:
+Report each independently:
 
-1. Veri akıyor.
-2. Replay doğru.
-3. Tahmin üretiliyor.
-4. Risk/decision çalışıyor.
-5. Paper fill tutarlı.
-6. Ekonomik sonuç pozitif.
-7. Taşınabilir restore geçti.
+1. Data is flowing.
+2. Replay is correct.
+3. Predictions are produced.
+4. Risk/decision processing works.
+5. Paper fills are consistent.
+6. Economic results are positive.
+7. Portable restore passed.
 
-Bunlardan biri diğerinin kanıtı değildir.
+None of these proves another.

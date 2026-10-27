@@ -1,33 +1,36 @@
 # 10 — EOD Report
 
-EOD raporu insan okunur özet + JSON artefact üretir. Tek günlük rapor model seçimi için tek başına yeterli değildir.
+Produce a human-readable summary and a JSON artifact. A single daily report is
+insufficient for model selection.
 
-## İçerik
+## Contents
 
-- Veri kapsaması.
-- Gap/stale/reconnect sayısı.
-- Disk/RAM/cache durumu.
-- Sinyal sayısı: produced, blocked, entered, exited.
-- Strateji bazlı brüt/net sonuç.
-- Fee/slippage etkisi.
-- Paper-fill mode kırılımı.
-- Markout özeti.
+- Data coverage.
+- Gap/stale/reconnect counts.
+- Disk/RAM/cache status.
+- Signal counts: produced, blocked, entered, exited.
+- Gross/net results by strategy.
+- Fee/slippage impact.
+- Paper-fill mode breakdown.
+- Markout summary.
 - Model accuracy/calibration metrics.
 - Risk: max drawdown, daily loss latch, stops.
-- Alarm özeti.
-- Araştırma önerileri.
+- Alarm summary.
+- Research recommendations.
 
-## Revision ve idempotency
+## Revision and idempotency
 
-- Aynı gün için rapor tekrar üretilebilir.
-- Geç gelen/reconciled fill varsa `revision` artar.
-- Önceki revision overwrite edilmez.
-- Final-test sonuçları model seçimine sızdırılmaz.
+- Reports may be regenerated for the same day.
+- Increment `revision` for late/reconciled fills.
+- Do not overwrite previous revisions.
+- Do not leak final-test results into model selection.
 
-## Gün kesimi
+## Day boundary
 
-Config timezone: Europe/Amsterdam veya UTC olarak tanımlanır. V0 önerisi UTC trading day’dir; kullanıcı raporu Amsterdam yerel saatini de gösterebilir.
+Configure Europe/Amsterdam or UTC explicitly. UTC trading days are recommended for
+V0; user reports may additionally show Amsterdam local time.
 
-## Örnek JSON alanları
+## Example JSON fields
 
-`eod_report.schema.json` zorunlu alanları: summary, data_quality, strategy_results, model_results, paper_results, alarms, revisions.
+Required `eod_report.schema.json` fields: summary, data_quality, strategy_results,
+model_results, paper_results, alarms, revisions.

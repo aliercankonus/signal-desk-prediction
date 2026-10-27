@@ -1,38 +1,40 @@
 # 07 — Model Comparison
 
-## İlk adaylar
+## Initial candidates
 
-| Model | Rol |
-|---|---|
-| No-change / midpoint | Referans |
-| Simple momentum | Referans |
-| Logistic regression | Yön olasılığı |
-| Micro-Price | Kısa vadeli fiyat referansı |
-| Small CatBoost | Nonlinear aday; VPS dışında eğitilir |
+| Model | Role |
+| --- | --- |
+| No-change / midpoint | Reference |
+| Simple momentum | Reference |
+| Logistic regression | Direction probability |
+| Micro-Price | Short-term price reference |
+| Small CatBoost | Nonlinear candidate; train outside the VPS |
 
-## Kurallar
+## Rules
 
-- Aynı veri dönemi, aynı feature snapshot ve aynı maliyet varsayımı kullanılır.
-- Kalibre edilmemiş skor olasılık değildir.
-- 1 dakika ve 5 dakika ayrı hedeflerdir.
-- Event-level Micro-Price çıktısı doğrudan 1/5 dk başarı oranı sayılmaz.
-- Ensemble varsayılan değildir.
-- Model seçimi validasyonda, final test yalnız bir kez yapılır.
-- Sonuç negatifse strateji/model reddedilebilir; aynı final testte ayar değiştirerek kurtarılmaz.
+- Use the same data period, feature snapshots and cost assumptions.
+- An uncalibrated score is not a probability.
+- One-minute and five-minute targets are separate.
+- Event-level Micro-Price output is not directly a 1/5-minute success rate.
+- An ensemble is not the default.
+- Select models on validation; run the final test once.
+- Reject negative strategies/models when appropriate; do not rescue them by tuning on the same final test.
 
-## Veri bölme
+## Data split
 
-Önerilen araştırma penceresi 60 gündür; 100 GB profil tam raw replay için yeterli olmayabilir. Feature/label seti daha uzun tutulabilir, ancak fill/replay iddiaları raw detay desteği ister.
+The proposed research window is 60 days. The 100 GB profile may not support full
+raw replay. Feature/label datasets may be retained longer, but fill/replay claims
+require supporting raw detail.
 
-## Saklanacak manifest
+## Required manifest
 
-`model_manifest.schema.json` zorunludur:
+`model_manifest.schema.json` is mandatory:
 
-- Model id/version.
+- Model ID/version.
 - Training/validation/final windows.
 - Feature version.
 - Label definition.
 - Calibration method.
 - Cost assumptions.
-- Metrics: accuracy, Brier, log-loss, calibration bins, net expectancy, coverage, max drawdown, trades count.
+- Metrics: accuracy, Brier, log-loss, calibration bins, net expectancy, coverage, max drawdown, trade count.
 - Artifact hash.

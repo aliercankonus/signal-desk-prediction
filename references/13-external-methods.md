@@ -2,43 +2,47 @@
 
 ## Day Trader Skill
 
-Alınacaklar:
+Adapt:
 
-- Risk check before intent.
-- Position sizing as minimum of risk, cash and max notional constraints.
-- Exit plan before entry.
+- Risk checks before intent.
+- Position sizing as the minimum of risk, cash and max-notional constraints.
+- Exit plans before entry.
 
-Uyarlama:
+Required changes:
 
-- ABD hisse varsayımları yerine BTC decimal lot/step.
-- 15 dk stale price kabul edilmez.
-- Daily loss ve risk reservation ayrılır.
+- Replace US stock assumptions with BTC decimal lot/step precision.
+- Do not accept prices stale by 15 minutes.
+- Separate daily loss and risk reservation.
 
 ## ECC
 
-Alınacaklar:
+Adapt:
 
-- Latency-critical measurement: p50/p95/p99, stale data, queue depth.
+- Latency-critical measurement: p50/p95/p99, stale data and queue depth.
 - Verification loop.
 - Docker patterns.
-- Security principle: modelden bağımsız risk limits.
+- Model-independent risk limits from LLM trading security.
 
-Runtime dependency değildir.
+Do not add the full package as a runtime dependency.
 
 ## Ruflo
 
-Yalnız offline development/research coordination için opsiyonel. Runtime decision engine veya paper ledger’a bağlanmaz.
+Optional offline development/research coordination only; never a dependency of the
+live Decision Engine or paper ledger.
 
-## Firmalardan alınan dersler
+## Lessons from quantitative firms
 
-- Jane Street: live/replay ortak event-driven feature engine; aynı fiyatlı farklı olayları koru.
-- Optiver: fill olmak iyi işlem anlamına gelmez; markout ölç.
-- XTX/Optiver: büyük model kalıcı edge garantisi değildir; bozulma ve overfit izle.
+- Jane Street: shared live/replay event-driven feature engine; preserve distinct same-price events.
+- Optiver: a fill does not establish a good trade; measure markout.
+- XTX/Optiver: larger models do not guarantee persistent edge; monitor degradation and overfitting.
 
-## Araştırma kaynak ekleme kuralı
+## Adding research sources
 
-Her dış yöntem `references/15-research-decision-policy.md` uyarınca decision log girdisi ve kaynakla eklenir.
+Add every external method with a source and decision-log entry under
+`references/15-research-decision-policy.md`.
 
-## Time Machine — kabul edilen ek feature
+## Time Machine — accepted additional feature
 
-[Time Machine sözleşmesini](16-timemachine.md) uygula: mevcut replay'den ayrı senaryo simülasyonu ve tarihsel kural testi. Kaynak incelendi; BTC uyarlaması tasarım olarak kabul edildi, çalışan simülatör henüz yok.
+Apply the [Time Machine contract](16-timemachine.md): scenario simulation and
+historical-rule testing separate from existing replay. Source review is complete;
+the BTC adaptation is an accepted design, not an implemented simulator.

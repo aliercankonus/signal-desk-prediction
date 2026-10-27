@@ -1,31 +1,31 @@
 # 06 — Model Comparison
 
-## İlk adaylar
+## Initial candidates
 
-| Model | Rol |
-|---|---|
-| Midpoint/no-change | Referans |
-| Simple momentum | Referans |
-| Logistic regression | Yön olasılığı |
-| Micro-Price | Kısa vadeli fiyat referansı |
-| Small CatBoost | Nonlinear aday; VPS dışında eğitilir |
+| Model | Role |
+| --- | --- |
+| No-change / midpoint | Reference |
+| Simple momentum | Reference |
+| Logistic regression | Direction probability |
+| Micro-Price | Short-term price reference |
+| Small CatBoost | Nonlinear candidate; train outside the VPS |
 
-## Kurallar
+## Rules
 
-- Aynı veri dönemi, aynı feature snapshot ve aynı maliyet varsayımı kullanılır.
-- Kalibre edilmemiş skor olasılık değildir.
-- 1 dakika ve 5 dakika ayrı hedeflerdir.
-- Micro-Price’ın event-level çıktısı doğrudan 1/5 dk başarı oranı sayılmaz.
-- Ensemble varsayılan değildir.
-- Model seçimi validasyonda, final test yalnız bir kez.
-- Sonuç negatifse strateji/model reddedilebilir; ayarlarla aynı testte kurtarılmaya çalışılmaz.
+- Use the same data period, feature snapshots and cost assumptions.
+- An uncalibrated score is not a probability.
+- One-minute and five-minute targets are separate.
+- Event-level Micro-Price output is not directly a 1/5-minute success rate.
+- An ensemble is not the default.
+- Select models on validation; run the final test once.
+- Reject negative strategies/models when appropriate; do not rescue them by tuning on the same final test.
 
-## Saklanacak manifest
+## Required manifest
 
-- Model id.
+- Model ID.
 - Training data window.
 - Feature version.
 - Label definition.
 - Calibration method.
 - Cost assumptions.
-- Metrics: accuracy, Brier, log-loss, calibration bins, net expectancy, coverage, max drawdown, trades count.
+- Metrics: accuracy, Brier, log-loss, calibration bins, net expectancy, coverage, max drawdown, trade count.

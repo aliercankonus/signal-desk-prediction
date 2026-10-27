@@ -2,42 +2,48 @@
 
 ## Day Trader repository
 
-Kullanılacak fikirler:
-- Risk check.
-- Position sizing.
-- Exit plan.
-- Order plan fingerprint.
+Adapt these ideas:
 
-Doğrudan alınmayacak:
-- ABD hisse varsayımları.
-- Tam hisse/sent hassasiyeti.
-- 15 dakikalık freshness.
-- Kriptoyu engelleyen kontroller.
-- Broker akışı.
+- Risk checks.
+- Position sizing.
+- Exit plans.
+- Order-plan fingerprints.
+
+Do not directly adopt:
+
+- US stock assumptions.
+- Whole-share/cent precision.
+- 15-minute freshness.
+- Checks that block crypto.
+- Broker workflows.
 
 ## ECC
 
-Kullanılacak:
-- Latency-critical systems ölçüm yaklaşımı.
+Adapt:
+
+- Latency-critical measurement methods.
 - Verification loop.
 - Docker patterns.
-- LLM trading security’den modelden bağımsız risk limitleri.
+- Model-independent risk limits from LLM trading security.
 
-Tam paket runtime dependency olmayacak.
+Do not add the full package as a runtime dependency.
 
 ## Ruflo
 
-Opsiyonel geliştirme/araştırma koordinasyonu. Canlı Decision Engine veya ledger dependency değildir.
+Optional offline development/research coordination only; never a dependency of the
+live Decision Engine or paper ledger.
 
-## Quant firmalarından dersler
+## Lessons from quantitative firms
 
-- Canlı/replay ortak feature engine.
-- Fiyat değişmedi diye olayları atlama.
-- Dolum sonrası markout ölç.
-- Timeout alttaki işi durdurmamış olabilir.
-- Restart/snapshot/buffer güvenliği test edilir.
-- Büyük model kârlılık garantisi değildir.
+- Share the feature engine between live processing and replay.
+- Do not discard events merely because the price is unchanged.
+- Measure post-fill markout.
+- A timeout may not have stopped the underlying operation.
+- Test restart/snapshot/buffer safety.
+- A large model does not guarantee profitability.
 
-## Time Machine — kabul edilen ek feature
+## Time Machine — accepted additional feature
 
-[Time Machine sözleşmesini](16-timemachine.md) uygula: mevcut replay'den ayrı senaryo simülasyonu ve tarihsel kural testi. Kaynak incelendi; BTC uyarlaması tasarım olarak kabul edildi, çalışan simülatör henüz yok.
+Apply the [Time Machine contract](16-timemachine.md): scenario simulation and
+historical-rule testing separate from existing replay. Source review is complete;
+the BTC adaptation is an accepted design, not an implemented simulator.

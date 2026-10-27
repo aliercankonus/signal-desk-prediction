@@ -1,20 +1,21 @@
 # 07 — Risk and Decision Engine
 
-## Kararlar
+## Decisions
 
-- `ENTER`: Yeni paper pozisyon açma niyeti.
-- `HOLD`: Mevcut pozisyonu koru.
-- `UPDATE_STOP`: Pozisyonu kapatmadan stop korumasını güncelle.
-- `EXIT`: Açık pozisyonu kapatma/azaltma isteği.
-- `WAIT`: Fırsat yok.
-- `BLOCK`: Veri, risk, config veya sistem sorunu nedeniyle yeni giriş engeli.
-- `HALT`: Kritik sistem durumu; yeni risk alınmaz.
+- `ENTER`: intent to open a new paper position.
+- `HOLD`: retain the current position.
+- `UPDATE_STOP`: update stop protection without closing the position.
+- `EXIT`: request closure/reduction of an open position.
+- `WAIT`: no opportunity.
+- `BLOCK`: prevent new entries because of data, risk, config or system problems.
+- `HALT`: critical system state; take no new risk.
 
-## Durumlar
+## States
 
-Mode, position state, order intent state ve risk latch ayrı saklanır.
+Persist mode, position state, order intent state, and risk latch separately.
 
 Position:
+
 - `FLAT`
 - `OPENING`
 - `OPEN`
@@ -23,6 +24,7 @@ Position:
 - `RECOVERING`
 
 Order intent:
+
 - `PLANNED`
 - `RISK_RESERVED`
 - `PENDING_SEND`
@@ -34,7 +36,7 @@ Order intent:
 - `REJECTED`
 - `UNKNOWN`
 
-## Öncelik sırası
+## Priority order
 
 1. Ledger write failure → BLOCK/HALT.
 2. Recovery/reconciliation incomplete → BLOCK.
@@ -45,28 +47,29 @@ Order intent:
 7. Strategy ENTER.
 8. HOLD/WAIT.
 
-## Risk varsayılanları
+## Risk defaults
 
-- Risk/trade: 0.25% equity.
-- Daily loss: 1.0% start-of-day equity.
-- Max notional: 10% equity.
+- Risk/trade: 0.25% of equity.
+- Daily loss: 1.0% of start-of-day equity.
+- Max notional: 10% of equity.
 - Max open positions: 1.
 - Re-entry cooldown: 60s.
-- After stop cooldown: 300s.
+- After-stop cooldown: 300s.
 
-Bunlar paper başlangıç parametreleridir; optimum değildir.
+These are initial paper parameters, not validated optima.
 
-## Günlük zarar davranışı
+## Daily loss behavior
 
-Daily loss tetiklenirse:
-- Yeni ENTER BLOCK.
-- Bekleyen girişler iptal edilir.
-- Açık miktar için EXIT istenir.
-- Veri bayatsa çıkış tamamlanmış gösterilmez; state `UNCERTAIN/RECOVERING` kalır.
+When the daily loss limit triggers:
 
-## İdempotency
+- BLOCK new ENTER decisions.
+- Cancel pending entries.
+- Request EXIT for the open quantity.
+- If data is stale, do not report exit completion; retain `UNCERTAIN/RECOVERING` state.
 
-Order intent id, şu alanlardan türetilmelidir:
+## Idempotency
+
+Derive the order intent ID from these fields:
 
 - strategy_id
 - signal_id
@@ -78,4 +81,4 @@ Order intent id, şu alanlardan türetilmelidir:
 - intended_qty
 - stop/tp/time_stop plan hash
 
-Aynı intent belirsiz kaldıysa yeni kimlikle tekrar gönderme; reconcile et.
+If an intent remains uncertain, do not resend it with a new identity; reconcile it.
