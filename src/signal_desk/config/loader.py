@@ -46,6 +46,11 @@ def validate_config(config_path: str | Path = DEFAULT_CONFIG_PATH, schema_path: 
         msg = "\n".join(f"{list(e.path)}: {e.message}" for e in errors)
         raise ConfigError(f"Config validation failed:\n{msg}")
     _validate_operational_invariants(config)
+    from signal_desk.collector.recovery import RecoveryPolicy
+    try:
+        RecoveryPolicy.from_config(config)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
     return config
 
 

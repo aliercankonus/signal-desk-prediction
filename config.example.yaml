@@ -98,3 +98,14 @@ eod:
   timezone: UTC
   local_display_timezone: Europe/Amsterdam
   revision_on_reconcile: true
+
+# Optional for existing v16 configs; missing keys use the validated policy defaults.
+# Continuous mode remains opt-in; Compose collector still defaults to idle.
+collector:
+  max_failures: 5
+  retry_initial_seconds: 1
+  retry_max_seconds: 30
+  stable_reset_seconds: 60
+  status_interval_seconds: 5
+  storage_check_seconds: 5
+  snapshot_timeout_seconds: 15

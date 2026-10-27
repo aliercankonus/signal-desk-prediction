@@ -57,3 +57,7 @@ Bu skill çalışan bir trading bot değildir. Gerçek emir, gerçek para ve API
 ## Time Machine feature kararı — 2026-10-27
 
 `timemachine` feature'ını replay modülünden ayrı geliştir. Monte Carlo senaryoları ile gerçek geçmiş kural testini ayrı tut; BTCUSDT spot paper-only, UTC, nedensellik ve maliyet sözleşmesini uygula. [Time Machine sözleşmesini](references/16-timemachine.md) oku. Şimdilik yalnız feature tasarımı kabul edildi; simülatör, şemalar ve testler uygulanmış değildir. VPS smoke testi bu feature'ı beklemez.
+
+## Sürekli collector adayı
+
+Sürekli toplama, reconnect veya resync işlerinde [collector sözleşmesini](references/17-continuous-collector.md) uygula. Yeni continuous modu yerel testlidir; VPS kabulü bekler. Compose varsayılanı idle kalır. Önce collector image/test, sonra 60 saniyelik sınırlı test; başarı ve kaynak ölçümü olmadan 24/7 kurulum yapma. Time Machine ve gerçek emir kapsamını değiştirme.

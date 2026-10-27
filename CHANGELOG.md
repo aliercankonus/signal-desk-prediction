@@ -57,3 +57,17 @@
 - Preserve previous update ID, stop on genuine gaps/overflow, print failure JSON.
 - Added 8 mocked stream regression tests; full local suite 24 passed.
 - VPS rebuild/live retest pending; continuous collector readiness not established.
+
+## 2026-10-27 — Opt-in continuous collector candidate
+- Added bounded recovery/backoff, new snapshot and book on every reconnect, cumulative
+  counters and session tags; require sustained healthy progress before resetting retries.
+- Added killable REST child, signal/deadline shutdown, permanent HTTP HALT and storage caps.
+- Added optional validated collector policy; keep current active config compatible.
+- Added collector CPU/PID/log limits; Compose default remains idle, restart disabled.
+- Local suite 49 passed, config/schema validation passed; VPS continuous validation pending.
+
+## 2026-10-27 — Stale pipeline diagnostics and schema reuse
+- Reuse checked validators with bounded identity-keyed cache; still validate each event.
+- Add receipt/application age, queue, loop-lag, validation/write/IO diagnostics.
+- Preserve last failure diagnostics across resync. Keep freshness/fsync/CPU limits.
+- Local suite 53 passed; first 60s VPS run had two stale resyncs, repeat pending.
