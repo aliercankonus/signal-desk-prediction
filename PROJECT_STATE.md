@@ -6,10 +6,10 @@ Status: runnable skeleton package updated to v16.
 
 - Specification readiness: high.
 - G0/G1 local readiness: implemented and locally tested.
-- G2 collector readiness: Binance mapping and gap detection implemented; live network smoke test pending.
+- Collector readiness: bounded 25/1,000-record VPS live smoke passed; optional continuous candidate locally tested, VPS acceptance pending.
 - G3 replay/feature readiness: basic replay and feature snapshots implemented; live/replay parity pending.
 - EOD readiness: skeleton counts implemented; PnL/model evaluation pending.
-- Deployment readiness: Docker files exist but Docker runtime not validated in this environment.
+- Deployment readiness: user verified API image build, 24 tests and paper-only healthy API on VPS; new continuous collector image/resource limits pending.
 - Paper run readiness: not ready until full ledger, paper executor loop and EOD PnL pass.
 - Live trading readiness: out of scope.
 
@@ -72,3 +72,15 @@ User-reported VPS evidence at /docker/hermes-agent-qbva/data/signal-desk-predict
 - New image build and live retest on VPS pending; no 24h soak or profitability claim.
 - Fix/research source and bounds: decision_log/2026-10-27-binance-stream-bootstrap.md.
 - Continuous reconnect/resync and resource soak are still pending.
+
+## Continuous collector candidate — 2026-10-27
+- User reported VPS bootstrap acceptance: 24 passed; 25 records (19 depth/5 trade)
+  and 1,000 records (275 depth/724 trade), both gap_count=0, exit=0.
+- Bootstrap fix merged to main at 76d00b8 and checked out on VPS.
+- Continuous recovery candidate: local 49-test suite and schema/config validation pass.
+- Added bounded retry/resync, cancellable snapshot requests, storage limits and counters.
+- Config collector section is optional; preserve the user's active config/config.yaml.
+- Compose remains idle. No unattended collector has been started by this change.
+- Next single task: rebuild/test candidate collector on VPS, then bounded 60s run.
+- Pending: actual resource measurements, live fault injection, soak, retention,
+  replay parity, full paper ledger/EOD/model results.

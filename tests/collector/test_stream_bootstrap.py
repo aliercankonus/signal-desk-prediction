@@ -70,6 +70,9 @@ def setup(monkeypatch, ws, snapshots):
         return {"lastUpdateId": next(values), "bids": [["10", "1"]], "asks": [["11", "1"]]}
 
     monkeypatch.setattr(collector, "fetch_depth_snapshot", snapshot)
+    async def async_snapshot(*args, **kwargs):
+        return await asyncio.to_thread(collector.fetch_depth_snapshot, *args)
+    monkeypatch.setattr(collector, "fetch_snapshot_async", async_snapshot)
     return writes, statuses, calls, snapshot
 
 
@@ -167,3 +170,27 @@ def test_socket_error_is_reported_and_not_swallowed(monkeypatch, capsys):
     monkeypatch.setattr(collector.websockets, "connect", broken_connection)
     assert run() == 1
     assert json.loads(capsys.readouterr().out)["reason"] == "connection refused"
+
+
+def test_server_shutdown_requires_new_synchronization(monkeypatch):
+    ws = FakeSocket([json.dumps({"e": "serverShutdown"})])
+    _, statuses, _, _ = setup(monkeypatch, ws, [105])
+    assert run() == 2
+    assert "serverShutdown" in statuses[-1][1]
+
+
+def test_depth_staleness_is_not_masked_by_trades(monkeypatch):
+    class TradeOnlyAfterBridge(FakeSocket):
+        async def __anext__(self):
+            if self.messages.empty():
+                await asyncio.sleep(.001)
+                return trade()
+            return await super().__anext__()
+
+    ws = TradeOnlyAfterBridge([depth(99, 100), depth(106, 107)])
+    writes, statuses, _, _ = setup(monkeypatch, ws, [105])
+    collector.validate_config("unused")["exchange"]["market_data"]["stale_l2_ms"] = 10
+    assert asyncio.run(collector.run_stream_async("unused", max_events=100000)) == 2
+    assert any(e["event_type"] == "trade" for e in writes)
+    assert statuses[-1][0] == "RESYNCING"
+
