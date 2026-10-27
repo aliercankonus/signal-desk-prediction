@@ -1,33 +1,35 @@
 # 06 — Strategy Catalog
 
-## Kategori sırası
+## Category sequence
 
-| Kategori | Strateji | Amaç | Aktivasyon |
-|---|---|---|---|
-| Baseline | S0 no-trade / midpoint / momentum | Referans | V0 zorunlu |
-| Primary | S1 order-flow continuation | İlk işlem hipotezi | V0 primary |
-| Variant | S1b cost gate | S1’in maliyet filtresi | S1 sonrası |
-| Variant | S1c fixed stop/TP/time stop | Risk kontrollü S1 | S1b sonrası |
-| Variant | S1d trailing stop A/B | Pozisyon yönetimi testi | S1c sonrası |
-| Secondary | S2 breakout/retest | Momentum/kırılım hipotezi | V1 |
-| Secondary | S3 VWAP mean reversion | Yatay piyasa dönüş hipotezi | V1 |
+| Category | Strategy | Purpose | Activation |
+| --- | --- | --- | --- |
+| Baseline | S0 no-trade / midpoint / momentum | Reference | Required in V0 |
+| Primary | S1 order-flow continuation | First trading hypothesis | V0 primary |
+| Variant | S1b cost gate | S1 cost filter | After S1 |
+| Variant | S1c fixed stop/TP/time stop | Risk-controlled S1 | After S1b |
+| Variant | S1d trailing stop A/B | Position-management test | After S1c |
+| Secondary | S2 breakout/retest | Momentum/breakout hypothesis | V1 |
+| Secondary | S3 VWAP mean reversion | Sideways-market reversion hypothesis | V1 |
 
-## V0 kuralı
+## V0 rule
 
-V0’da tüm strateji arayüzleri bulunur; aktif paper karar sırası S0 + S1 ile başlar. S2/S3 kodlanabilir ama default ENTER üretmez; replay/analysis mode’da çalışabilir.
+V0 includes interfaces for all strategies; active paper decisions start with S0 + S1.
+S2/S3 may be implemented but must not produce ENTER by default; they can run in
+replay/analysis mode.
 
-## Pozisyon yönetimi
+## Position management
 
-- Yükseliş sürüyor diye sürekli kapat/aç yapılmaz.
-- Mevcut pozisyon için HOLD varsayılan korunur.
-- Stop güncelleme pozisyon kapatmaktan ayrı karardır: UPDATE_STOP.
-- Long stop yalnız yukarı taşınır; aşağı indirilmez.
-- Yeni tahmin azami tutma süresini sıfırlamaz.
-- Yeniden giriş için kapanış doğrulaması, cooldown ve yeni signal gerekir.
+- Do not repeatedly close/reopen merely because the upward expectation persists.
+- Preserve HOLD as the default for an existing position.
+- Updating protection is separate from closing: UPDATE_STOP.
+- A long stop only moves upward, never downward.
+- A new prediction does not reset maximum holding duration.
+- Re-entry requires confirmed closure, cooldown and a new signal.
 
 ## S1 order-flow continuation
 
-Girdi adayları:
+Candidate inputs:
 
 - Trade aggressor imbalance.
 - Order book imbalance.
@@ -36,17 +38,19 @@ Girdi adayları:
 - Event intensity.
 - Short-window returns.
 
-Karar:
+Decision:
 
-- Signal valid_until zorunlu.
+- Signal valid_until is required.
 - Expected move > fee + spread + slippage stress.
 - Data quality OK.
 - Risk budget OK.
 
 ## S2 breakout/retest
 
-Öncelik V1. Basit breakout, breakout+retest ve breakout+flow confirmation ayrı ölçülür. Geri test beklemek net sonucu iyileştirmiyorsa kaldırılır.
+V1 priority. Measure simple breakout, breakout+retest and breakout+flow confirmation
+separately. Remove the retest requirement if waiting for it does not improve net results.
 
 ## S3 VWAP mean reversion
 
-Öncelik düşük. Sadece yatay/düşük trend rejiminde ve maliyeti aşabilecek sapma varsa paper analysis üretir.
+Low priority. Produce paper analysis only in sideways/low-trend regimes with a
+deviation large enough to cover costs.

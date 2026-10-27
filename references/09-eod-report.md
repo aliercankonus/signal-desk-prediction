@@ -1,8 +1,8 @@
 # 09 — EOD Report
 
-EOD her gün çalışır ve idempotent olmalıdır. Aynı gün tekrar çalıştırılırsa revision üretir.
+Run EOD daily and make it idempotent. A rerun for the same day produces a revision.
 
-## İnsan okunur rapor
+## Human-readable report
 
 - Data coverage.
 - Gaps/stale periods.
@@ -20,12 +20,12 @@ EOD her gün çalışır ve idempotent olmalıdır. Aynı gün tekrar çalışt�
 - Alarms and halts.
 - Next recommended research action.
 
-## JSON sözleşmesi
+## JSON contract
 
-`schemas/eod_report.schema.json` kullanılır.
+Use `schemas/eod_report.schema.json`.
 
-## Midnight kuralları
+## Midnight rules
 
-- Gece yarısını aşan pozisyonlar önceki gün açılış kanıtıyla, kapanış günü sonucu ile ilişkilendirilir.
-- Geç gelen fill correction EOD revision üretir.
-- EOD final-test sonucunu model seçimine geri sızdırmaz.
+- Link positions crossing midnight to their prior-day opening evidence and closing-day result.
+- Late fill corrections produce EOD revisions.
+- Do not leak final-test results back into model selection through EOD.

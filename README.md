@@ -1,57 +1,73 @@
 # Signal Desk Prediction
 
-Binance BTCUSDT spot için paper-only collector, araştırma, replay ve karar sistemi.
-Gerçek emir kapalıdır. Çalışan collector, kârlı strateji veya tamamlanmış paper ledger
-anlamına gelmez.
+A paper-only collector, research, replay and decision system starting with Binance
+BTCUSDT spot. Real orders are disabled. A working collector does not establish a
+profitable strategy or a complete paper ledger.
 
-## Tek işlemle mevcut kurulum
-Repo içinden:
+## Project language
+
+Repository documentation, skills, decision records, code comments and user-facing
+runtime messages must be written in English. Conversation language does not change
+this requirement. Preserve identifiers, command syntax and contract semantics when
+translating existing material.
+
+## Install from an existing checkout
+
+From the repository directory:
+
 ```bash
 bash scripts/install.sh
 ```
-Config ve data volume korunur; script build, config/schema, tüm testler, kısa public
-Binance smoke ve API health kontrolünü sırayla yapar. Yalnız API başlar, collector
-varsayılanı idle kalır. Mevcut Docker engine yeniden kurulmaz.
 
-## Yeni sunucuda tek işlemle kurulum
+The installer preserves configuration and the data volume. It runs image builds,
+config/schema validation, the full test suite, a short public Binance smoke test
+and API health checks in sequence. Only the API starts; the collector remains idle
+by default. An existing Docker engine is not reinstalled.
 
-Ubuntu 22.04/24.04 sunucusunun ana terminalinde (root/sudo):
+## Install on a new server in one operation
+
+Run from the Ubuntu 22.04/24.04 host terminal with root/sudo access:
 
 ```bash
 sudo bash -c 'set -eu; command -v curl >/dev/null || { apt-get update; apt-get install -y ca-certificates curl; }; f=$(mktemp); trap "rm -f \"$f\"" EXIT; curl -fsSL https://raw.githubusercontent.com/aliercankonus/signal-desk-prediction/main/scripts/install.sh -o "$f"; bash "$f" --install-docker'
 ```
 
-Varsayılan checkout `/opt/signal-desk-prediction`, API adresi
-`127.0.0.1:8080` olur. Komutu VPS host terminalinden çalıştır.
-Geçmiş veri/model taşıma ve devamlı collector başlatma ayrı adımlardır.
+The default checkout is `/opt/signal-desk-prediction`; the API binds to
+`127.0.0.1:8080`. Run from the VPS host terminal. Restoring historical data/models
+and starting a continuous collector are separate steps.
 
-Yeni Ubuntu sunucusu ve tam parametreler: [INSTALLATION.md](INSTALLATION.md).
-Tüm manuel kurulum/teşhis/test komutları: [docs/COMMANDS.md](docs/COMMANDS.md).
-Dağıtım giriş noktası: [VPS_DEPLOYMENT.md](VPS_DEPLOYMENT.md).
+Full options: [INSTALLATION.md](INSTALLATION.md).
+Manual setup, diagnostics and test commands: [docs/COMMANDS.md](docs/COMMANDS.md).
+Deployment entry point: [VPS_DEPLOYMENT.md](VPS_DEPLOYMENT.md).
 
-## Kurulum komutları ve kayıtlar
+## Commands and installation records
 
-| İhtiyaç | Repository'deki kaynak |
+| Need | Repository source |
 | --- | --- |
-| Yeni/mevcut sunucu kurulumu, parametreler ve hata davranışı | [INSTALLATION.md](INSTALLATION.md) |
-| Docker/host teşhisi, config, build, test, API, snapshot ve stream komutları | [docs/COMMANDS.md](docs/COMMANDS.md) |
-| Kaynak, recovery, bir saatlik soak ve raw-session audit komutları | [docs/COMMANDS.md](docs/COMMANDS.md) |
-| Güncel teknik durum ve kalan kabul adımları | [PROJECT_STATE.md](PROJECT_STATE.md) |
+| New/existing server installation, options and failure behavior | [INSTALLATION.md](INSTALLATION.md) |
+| Docker/host diagnostics, config, builds, tests, API, snapshot and stream | [docs/COMMANDS.md](docs/COMMANDS.md) |
+| Resource, recovery, one-hour soak and raw-session audit commands | [docs/COMMANDS.md](docs/COMMANDS.md) |
+| Current technical status and remaining acceptance work | [PROJECT_STATE.md](PROJECT_STATE.md) |
 
-Her installer koşusu `runtime/install/run.*/` altında `deploy.log`, commit/config
-hash'i ve başarılıysa `manifest.json` üretir. Sonraki kurulum aynı script'ten
-yürütülür ve kullanılan sürümler kaydedilir. Manuel komut kataloğunda sunucu yolu,
-hostname ve session ID gibi değerler parametre olarak verilir.
+Each installer run writes `deploy.log`, commit/config hashes and, on success,
+`manifest.json` under `runtime/install/run.*/`. Reuse the same script for later
+installations and retain the recorded versions. The manual catalog uses parameters
+for host paths, hostnames and session IDs.
 
-## Kanıt ve güncel sınır
-- Collector snapshot, 25/1.000-record smoke, süreli continuous ve recovery testleri görüldü.
-- Bir saatlik koşu: 186.898 kayıt, gap/reconnect=0, normal exit ve OOM yok.
-- Scoped raw audit: aynı 186.898 kayıt, hata yok; parity veya exchange completeness değil.
-- Installer testleri sahte Docker ile orchestration testleridir; gerçek installer
-  ve bağımsız temiz host acceptance henüz pending.
-- 24h soak, p99 latency, bounded merged replay parity, veri restore, tam ledger/PnL,
-  ekonomik model kabulü tamamlanmadı. Time Machine yalnız feature sözleşmesi.
+## Evidence and limitations
 
-Installer yerel komut logu ve sürüm/hash manifest'i üretir. Kurulum geçmişi için
-sunucuya özel kimlik/özel yollar public source'a yazılmaz. PROJECT_STATE.md güncel
-teknik özet; decision_log araştırılmış karar; runtime/install yerel kurulum kanıtıdır.
+- Target-host collector tests covered snapshots, 25/1,000-record smoke tests,
+  bounded continuous collection and recovery.
+- One-hour run: 186,898 records, zero gaps/reconnects, normal exit and no OOM.
+- Scoped raw audit: the same 186,898 records, no errors. This is not live/replay
+  parity or proof of exchange completeness.
+- Installer orchestration has local fake-Docker test coverage. The user-reported
+  existing-VPS run returned `DEPLOY_OK`, with paper-only API health and local logs.
+  Independent clean-host installation remains unverified.
+- A 24h soak, p99 latency, bounded merged replay parity, data restore, full ledger/PnL
+  and economic model acceptance remain incomplete. Time Machine is specification-only.
+
+The installer keeps command logs and version/hash manifests locally. Host-specific
+identities and private paths are not published in source. `PROJECT_STATE.md` is the
+technical checkpoint; `decision_log` records rationale; `runtime/install` stores
+local installation evidence.

@@ -67,9 +67,9 @@
 - Final test run once.
 - Negative results preserved.
 
-## TM — Time Machine araştırma kabulü (pending)
+## TM — Time Machine research acceptance (pending)
 
-G0–G9 durumunu otomatik ilerletmez; ilk VPS smoke testini engellemez.
-references/16-timemachine.md içindeki nedensellik, determinism, horizon, maliyet/gap,
-ayrı tarihsel kural testi ve kaynak sınırı senaryolarını uygulama sonrası doğrula.
-Henüz simülatör/şema/test yok; kabul verilmedi.
+Does not automatically advance G0–G9 or block the initial VPS smoke test.
+After implementation, verify causality, determinism, horizons, costs/gaps, separate
+historical-rule tests and resource-limit scenarios in references/16-timemachine.md.
+The simulator, schemas and tests do not exist yet; acceptance has not been granted.

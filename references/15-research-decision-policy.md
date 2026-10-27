@@ -1,12 +1,13 @@
 # 15 — Research and Decision Policy
 
-## Kural
+## Rule
 
-Bundan sonra skill’e eklenecek teknik kararlar araştırmadan eklenmez. Karar küçük bile olsa kaynak, gerekçe ve test etkisi yazılır.
+Do not add technical decisions to the skill without research. Even a small decision
+needs sources, rationale and test impact.
 
-## Decision log formatı
+## Decision log format
 
-Her karar için `decision_log/YYYY-MM-DD-<slug>.md` oluştur:
+Create `decision_log/YYYY-MM-DD-<slug>.md` for every decision:
 
 ```markdown
 # Decision: <short title>
@@ -15,35 +16,37 @@ Her karar için `decision_log/YYYY-MM-DD-<slug>.md` oluştur:
 proposed | accepted | rejected | superseded
 
 ## Context
-Hangi sorun çözülecek?
+What problem is being solved?
 
 ## Sources checked
-- Kaynak adı + URL + tarih
-- Resmî belge/paper/üretici dokümanı tercih edilir.
+- Source name + URL + date
+- Prefer official documentation, papers and vendor documentation.
 
 ## Decision
-Ne seçildi?
+What was selected?
 
 ## Alternatives
-Neler reddedildi?
+What was rejected?
 
 ## Risks
-Yanlışsa ne olur?
+What happens if the decision is wrong?
 
 ## Tests added
-Hangi acceptance veya unit test eklendi?
+Which acceptance or unit tests were added?
 
 ## Rollback
-Nasıl geri alınır?
+How can the change be reverted?
 ```
 
-## Kaynak önceliği
+## Source priority
 
-1. Resmî exchange / Docker / library dokümanı.
-2. Akademik paper veya üretici teknik blogu.
-3. Açık kaynak kod + testler.
-4. Blog/yorum yalnız yardımcı kaynak.
+1. Official exchange / Docker / library documentation.
+2. Academic papers or vendor technical blogs.
+3. Open-source code and tests.
+4. Blogs/opinion only as supporting sources.
 
-## Özel kural
+## Special rule
 
-Kârlılık veya başarı şansı iddiası yalnız kendi forward paper test sonuçlarıyla yapılır. Dış firma kârı veya akademik accuracy doğrudan bizim beklenen getirimiz sayılmaz.
+Profitability or success-probability claims require this project's own forward paper
+test results. External firm profits or academic accuracy do not directly establish
+our expected returns.

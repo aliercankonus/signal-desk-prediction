@@ -1,19 +1,17 @@
 # 11 — Portable Deployment
 
-## Hedef
+## Target
 
-Başka desteklenen Linux sunucusunda:
+On another supported Linux server, the system should start without resetting data:
 
 ```bash
 cp .env.example .env
-# config doldur
+# Populate config
 docker compose config -q
 docker compose up -d --wait
 ```
 
-ile sistem veri sıfırlamadan başlamalıdır.
-
-## Servisler
+## Services
 
 - `collector`
 - `feature-engine`
@@ -24,7 +22,7 @@ ile sistem veri sıfırlamadan başlamalıdır.
 - `eod-worker`
 - `maintenance`
 
-## Kalıcı alanlar
+## Persistent paths
 
 - `/data/raw`
 - `/data/features`
@@ -33,12 +31,12 @@ ile sistem veri sıfırlamadan başlamalıdır.
 - `/data/reports`
 - `/data/backups`
 
-## Bootstrap modları
+## Bootstrap modes
 
-1. **Fresh start:** Model yoksa prediction unavailable; collector veri toplamaya başlar.
-2. **Restore start:** Backup + model bundle + manifests doğrulanır; sonra readiness.
+1. Fresh start: prediction is unavailable without a model; the collector starts gathering data.
+2. Restore start: validate backup, model bundle and manifests before readiness.
 
-## Readiness kapıları
+## Readiness gates
 
 - Config valid.
 - Disk/RAM profile valid.
@@ -46,14 +44,14 @@ ile sistem veri sıfırlamadan başlamalıdır.
 - Volumes writable.
 - Binance market data connected or explicitly unavailable.
 - Ledger writable.
-- Model loaded or unavailable marked.
+- Model loaded or marked unavailable.
 - Paper mode confirmed.
 - No live execution.
 
-## Clean-host kabul
+## Clean-host acceptance
 
-- Elle kod düzenlemesi yok.
-- Eski `/opt` yollarına bağımlılık yok.
-- Container names namespace içinde.
-- Restart sonrası checkpoint korunur.
-- Backup restore hashleri tutar.
+- No manual code editing.
+- No dependency on old `/opt` paths.
+- Container names stay within the namespace.
+- Checkpoints survive restart.
+- Backup/restore hashes match.

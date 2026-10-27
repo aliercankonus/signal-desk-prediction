@@ -1,30 +1,35 @@
 # 05 — Strategy Catalog
 
-Stratejiler doğru kategorilere ayrılmıştır. Her strateji ayrı ön kayıt, test ve sonuç ister.
+Strategies are grouped by purpose. Each requires separate preregistration, testing
+and results.
 
-## Kategori A — Baseline / No-trade
+## Category A — Baseline / No-trade
 
 ### S0: No-trade and simple baseline
-Amaç, sistemin işlem açmadan piyasa hareketlerini ve model referanslarını ölçmesidir.
+
+Measure market movements and model references without opening positions.
 
 - No-trade baseline.
 - Midpoint/no-change.
 - Simple momentum.
 - Cost-only gate.
 
-## Kategori B — Primary Alpha Candidate
+## Category B — Primary Alpha Candidate
 
 ### S1: Order-flow continuation
-İlk ana strateji.
 
-Giriş adayı:
-- Trade pressure aynı yönde.
-- L2 book imbalance/depth change destekliyor.
-- Spread ve fee sonrası beklenen hareket maliyeti karşılıyor.
-- Data quality healthy.
-- Aynı sinyal reset olmadan tekrar giriş yok.
+First primary strategy.
 
-Çıkış:
+Entry candidate:
+
+- Trade pressure points in the same direction.
+- L2 book imbalance/depth changes support it.
+- Expected movement covers spread and fees.
+- Data quality is healthy.
+- No repeated entry on the same signal without a reset.
+
+Exit:
+
 - Fixed stop.
 - Take profit.
 - Time stop.
@@ -32,42 +37,50 @@ Giriş adayı:
 - Risk or data HALT.
 
 ### S1b: S1 + cost gate
-S1’in maliyet filtresi sertleştirilmiş varyantıdır.
+
+S1 with a stricter cost filter.
 
 ### S1c: S1 + fixed stop/TP
-İlk paper kabul varyantı. Trailing kapalı.
+
+Initial paper acceptance variant. Trailing is disabled.
 
 ### S1d: S1 + trailing stop A/B
-Sabit stop’a karşı ayrı deneydir. Varsayılan değildir.
 
-Trailing kuralları:
-- Long stop yalnız yukarı taşınabilir.
-- UPDATE_STOP pozisyonu kapatmaz.
-- Yeni tahmin holding süresini sıfırlamaz.
-- Pending stop update ile confirmed stop ayrı tutulur.
-- Stop aşağı indirilemez; gevşetme manuel config change sayılır.
+A separate experiment against fixed stops, not the default.
 
-## Kategori C — Structural Price Action
+Trailing rules:
+
+- A long stop can only move upward.
+- UPDATE_STOP does not close the position.
+- A new prediction does not reset holding duration.
+- Keep pending and confirmed stop updates separate.
+- Do not lower stops; loosening protection is a manual config change.
+
+## Category C — Structural Price Action
 
 ### S2: Breakout and retest
-Önceki aralık kırılımı + geri test + order-flow doğrulaması.
 
-Kullanım:
-- S1’den sonra.
-- Geri test filtresinin net expectancy’yi artırıp artırmadığı ölçülür.
-- Daha az trade tek başına başarı değildir.
+Breakout of the previous range, retest and order-flow confirmation.
 
-## Kategori D — Mean Reversion Candidate
+Usage:
+
+- After S1.
+- Measure whether the retest filter improves net expectancy.
+- Fewer trades alone do not establish success.
+
+## Category D — Mean Reversion Candidate
 
 ### S3: VWAP mean reversion
-Yatay/düşük trend koşullarında VWAP sapmasından dönüş adayı.
 
-Kullanım:
-- Düşük öncelikli keşif.
-- Maliyet sonrası hareket büyüklüğü kritik.
-- Trend günlerinde otomatik çalıştırılmaz.
+Candidate for reversion from VWAP deviations in sideways/low-trend conditions.
 
-## Strateji sırası
+Usage:
+
+- Lower-priority exploration.
+- Post-cost movement size is critical.
+- Do not automatically activate on trending days.
+
+## Strategy sequence
 
 1. S0 baseline.
 2. S1 order-flow continuation.

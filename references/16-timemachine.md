@@ -1,97 +1,110 @@
-# Time Machine — ayrı araştırma feature'ı
+# Time Machine — separate research feature
 
-## Durum ve sınır
-2026-10-27: Kullanıcı tarafından kabul edilmiş feature sözleşmesi; uygulama ve sonuçlar henüz yok.
-Feature adı: `timemachine`. Kayıtlı market event → feature üreten `replay` modülünden ayrı tut.
-Time Machine'i tahmin modeli, yeni strateji, canlı emir yolu veya paper executor olarak sunma.
-Binance BTCUSDT spot long/flat paper-only kapsamını koru. VPS smoke testinin ön şartı yapma.
+## Status and boundaries
 
-## Araştırılmış kaynak ve alınan yöntem
-İncelenen kaynak: Jakeschincariol/day-trader-skill, commit
-`3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd`, kontrol tarihi 2026-10-27.
+2026-10-27: user-accepted feature contract; implementation and results do not exist yet.
+Feature name: `timemachine`. Keep it separate from the `replay` module that turns
+recorded market events into features. Do not present Time Machine as a prediction
+model, new strategy, live order path or paper executor. Preserve Binance BTCUSDT spot
+long/flat paper-only scope. Do not make it a prerequisite for VPS smoke tests.
+
+## Reviewed source and adapted method
+
+Source: Jakeschincariol/day-trader-skill, commit
+`3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd`, reviewed 2026-10-27.
+
 - [Skill](https://github.com/Jakeschincariol/day-trader-skill/blob/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd/trader-timemachine/SKILL.md)
-- [Kod](https://github.com/Jakeschincariol/day-trader-skill/blob/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd/trader-timemachine/timemachine.py)
-- [Testler](https://github.com/Jakeschincariol/day-trader-skill/blob/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd/tests/test_timemachine.py)
-- [MIT lisansı](https://github.com/Jakeschincariol/day-trader-skill/blob/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd/LICENSE)
+- [Code](https://github.com/Jakeschincariol/day-trader-skill/blob/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd/trader-timemachine/timemachine.py)
+- [Tests](https://github.com/Jakeschincariol/day-trader-skill/blob/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd/tests/test_timemachine.py)
+- [MIT license](https://github.com/Jakeschincariol/day-trader-skill/blob/3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd/LICENSE)
 
-Kaynak uygulama geçmiş seansların OHLC/önceki kapanış oranlarını saat dilimine göre
-örnekler; varsayılan 10.000 senaryo ve seed=19 kullanır. Aynı mumda stop/TP
-dokunursa stop-first uygular. Gerçek geçmiş kural testini ayrı raporlar.
-Tarihsel kural desteği ORB ile sınırlıdır; her stratejinin backtest'i değildir.
-Kaynak testleri incelendi, burada çalıştırılmadı. Kaynak kod kopyalanmadı/kurulmadı.
-İleride kod veya önemli metin kopyalanırsa MIT telif ve izin metnini koru.
+The source samples historical-session OHLC/previous-close ratios by time slot,
+using 10,000 scenarios and seed=19 by default. It uses stop-first when stop and TP
+are touched in the same candle. It reports real historical-rule tests separately.
+Historical-rule support is limited to ORB; this is not a backtest of every strategy.
+Source tests were inspected, not run here. Source code was not copied or installed.
+Preserve the MIT copyright/permission text if code or substantial text is copied later.
 
-## Bizim uyarlama kararları
-- ABD seans/kapanış/Yahoo varsayımlarını taşıma; doğrulanmış Binance verisi ve UTC kullan.
-  60 gün geçmiş hedefi ve 10.000 senaryo/seed=19 başlangıç araştırma ayarlarıdır,
-  yeterli örneklem veya doğruluk garantisi değildir.
-- İlk bar senaryosunu 5 dakikalık bar ve en az bir tam bar ufkuyla sınırla.
-  60 saniye hedefi için 1 dakikalık, daha kısa hedef için yeterli olay verisi gerekir;
-  5 dakikalık OHLC'den 60 saniyelik sonuç çıkarma.
-- 24 saat sınırını zorunlu çıkış sayma. Planın `horizon_seconds` ve
-  `time_stop_seconds` değerlerini uygula; gerçek süre sonu fill'i ile değerlemeyi ayır.
-- Havuzu yalnız `as_of` anından önce erişilebilir, kapanmış barlardan kur.
-  Açık bar, gelecek düzeltme, deney final penceresi ve düşük kalite/gap aralıklarını dışla.
-  Her pencerede expected/observed bar sayısı ve kullanılabilir geçmiş kapsamını kaydet.
-- Kaynağın bağımsız bar örneklemesini `independent_bar_reference_v1` referansı say;
-  seri bağımlılığı ve volatilite kümelenmesini koruduğunu varsayma.
-  Block-bootstrap yalnız ayrı yöntem adayıdır; yöntem/blok uzunluğu ve seçim aralığını
-  validation üzerinde önceden kaydetmeden varsayılanlaştırma.
-- Eksik fee, slippage, veri minimumları veya zaman bütçesiyle sayısal sonuç üretme:
-  `unavailable` ve neden döndür. Minimum kapsamı deneyden önce config'te sabitle;
-  evrensel "20 gün yeterli" veya "10.000 örnek bağımsız kanıttır" sonucu çıkarma.
-- Aynı bar stop ve hedefe dokunursa conservative stop-first uygula.
-  Long stop altına gap açılışında çıkış fiyatını stop'a sabitleme:
-  bar modelinde min(stop, open) üzerinden olumsuz kayma uygula.
-  OHLC'den gerçek kuyruk sırası, spread veya partial fill kanıtı çıkarma.
+## Adaptation decisions
+
+- Do not inherit US session/close/Yahoo assumptions; use validated Binance data and UTC.
+  A 60-day history target, 10,000 scenarios and seed=19 are initial research settings,
+  not guarantees of sufficient sample size or accuracy.
+- Restrict the first bar-based simulation to five-minute bars and at least one full
+  bar of horizon. A 60s target requires one-minute data; shorter targets need adequate
+  event data. Do not infer 60s outcomes from five-minute OHLC.
+- Do not force an exit at a 24-hour boundary. Apply the plan's `horizon_seconds` and
+  `time_stop_seconds`; distinguish actual expiry fills from valuation.
+- Build pools only from closed bars available before `as_of`. Exclude open bars,
+  future corrections, experiment final windows and low-quality/gap intervals.
+  Record expected/observed bar counts and available history coverage per window.
+- Label independent-bar sampling as `independent_bar_reference_v1`; do not assume
+  it preserves serial dependence or volatility clustering. Block bootstrap remains
+  a separate candidate. Preregister method, block length and selection range on
+  validation before making it the default.
+- Do not produce numeric results without fees, slippage, data minimums or a time
+  budget. Return `unavailable` with a reason. Freeze minimum coverage in config
+  before the experiment; do not claim “20 days is enough” universally or treat
+  10,000 sampled paths as independent evidence.
+- Use conservative stop-first when stop and target touch in the same bar. If a
+  long position gaps below its stop, do not pin exit to the stop: in a bar model,
+  apply adverse slippage from min(stop, open). OHLC cannot prove queue order,
+  spread or partial fills.
 - Net PnL = qty × (exit_fill − entry_fill) − entry_fee − exit_fee.
-  Net R = net PnL / başlangıç plan riski; risk = qty × (entry_reference − stop_reference).
-  Fee ve kaymayı sürümlü maliyet varsayımı olarak raporla; kaybı −1R ile sınırlama.
-  Stop/TP olasılığı ekonomik avantaj değildir; süre sonunda açık kalanları gizleme.
-- Canlı risk/ledger/intent değiştirme. Offline veya ayrı sınırlı araştırma worker'ında çalıştır;
-  2 GB toplam profil içinde açık CPU/RAM/süre sınırı olmadan VPS'de başlatma.
+  Net R = net PnL / initial planned risk; risk = qty × (entry_reference − stop_reference).
+  Report fees/slippage as versioned cost assumptions; do not cap loss at −1R.
+  Stop/TP probability is not economic edge. Do not hide positions still open at horizon.
+- Do not modify live risk, ledger or intents. Run offline or in a separate bounded
+  research worker. Never launch on the VPS without explicit CPU/RAM/time limits
+  within the total 2 GB profile.
 
-## İki ayrı çıktı
-1. `scenario_simulation`: planın sentetik yollarında target-first / stop-first /
-   horizon-open oranı; toplam 1; tüm senaryolar için net R ve PnL dağılımı,
-   terminal midpoint/bar fiyatı bantlarını fill veya pozisyon getirisi bandı diye sunma.
-   Monte Carlo örnekleme hatasını piyasa model belirsizliğinden ayır.
-2. `historical_rule_test`: sabit strateji kuralı ve nedensel giriş üretimi ile gerçek
-   geçmiş sonuçları; işlem sayısı, coverage, maliyet ve zaman bölmeleri.
-   S1 order-flow kuralı için gerekli L2/trade özellikleri yoksa mumdan sonuç uydurma;
-   `unsupported` döndür. Senaryo planını geçmiş her güne aynı fiyatla yapıştırma.
-   Planın tarihsel kuralı tanımlı değilse bu kanalı atla ve nedeni yaz.
+## Two separate outputs
 
-Bu iki kanalı birleştirip tek "başarı olasılığı" verme; uyuşmazlığı görünür tut.
-Veri sayısı, tarih aralığı, seed, algoritma ve maliyet sürümlerini her rapora koy.
-Model seçimi yalnız validation'da; final-test verisini simülasyon havuzuna sızdırma.
+1. `scenario_simulation`: target-first / stop-first / horizon-open fractions on
+   synthetic paths; they sum to 1. Report net R and PnL distributions for all paths.
+   Do not describe terminal midpoint/bar-price bands as fill or position-return
+   bands. Separate Monte Carlo sampling error from market-model uncertainty.
+2. `historical_rule_test`: real historical outcomes for a fixed strategy rule and
+   causal entries, including trade count, coverage, costs and temporal splits.
+   If the L2/trade features required for S1 order-flow are missing, return
+   `unsupported`; do not invent results from candles. Do not paste the same scenario
+   entry price onto every historical day. Skip this channel with a reason if no
+   historical rule is defined for the plan.
 
-## Planlanan modül ve sözleşmeler
-Henüz oluşturulmuş veya doğrulanmış dosyalar olarak gösterme:
-- `src/signal_desk/timemachine/`: replay'den ayrı feature.
+Do not combine these channels into one “success probability”; expose disagreement.
+Include sample count, date range, seed, algorithm and cost versions in every report.
+Select models on validation only; never leak final-test data into simulation pools.
+
+## Planned modules and contracts
+
+Do not describe these as existing or validated files:
+
+- `src/signal_desk/timemachine/`: feature separate from replay.
 - `schemas/timemachine_plan.schema.json`, `schemas/timemachine_result.schema.json`.
-- Merkezi config altında `timemachine`: enabled=false, method_version,
-  seed, simulations, bar_interval_seconds, horizon_seconds, lookback_days,
-  min_history_bars, min_history_days, max_runtime_seconds, max_memory_mb ve costs_version.
-  Parametreleri config.schema ile doğrulamadan çalışma moduna bağlama.
+- Central `timemachine` config: enabled=false, method_version, seed, simulations,
+  bar_interval_seconds, horizon_seconds, lookback_days, min_history_bars,
+  min_history_days, max_runtime_seconds, max_memory_mb and costs_version.
+  Validate parameters with config.schema before connecting them to a runtime mode.
 - Plan: plan_id, symbol, product_type, side, as_of, entry_reference, stop_reference,
-  target_reference, quantity, horizon/time-stop, strategy/rule_version ve costs_version.
-- Sonuç: run_id, status/reason, plan/config/data hashes, kaynak commit,
-  available_at/as_of, kullanılan veri aralığı/kalitesi, seed/simulations/method,
-  ayrı scenario_simulation ve historical_rule_test, kaynak tüketimi.
-- Rapor: `reports/timemachine/<run_id>.json`; aynı girdiler, yöntem ve seed ile
-  deterministik içerik. created_at/duration gibi runtime alanlarını içerik hash'inden ayır.
+  target_reference, quantity, horizon/time-stop, strategy/rule_version and costs_version.
+- Result: run_id, status/reason, plan/config/data hashes, source commit,
+  available_at/as_of, data range/quality, seed/simulations/method, separate
+  scenario_simulation and historical_rule_test, resource usage.
+- Report: `reports/timemachine/<run_id>.json`; deterministic content for identical
+  inputs, method and seed. Exclude runtime fields such as created_at/duration from
+  the content hash.
 
-## Kabul senaryoları — uygulamada eklenecek, henüz geçmedi
-- Sabit veri/plan/config/seed aynı sonuç; değişen girdi yeni fingerprint.
-- as_of sonrası veriyi eklemek sonucu değiştirmez; açık/gap barlar dışlanır.
-- Stop-first; stop altına gap'te kayıp −1R'den kötü olabilir; çift yönlü fee/slippage.
-- target + stop + open = 1; horizon-open PnL ve maliyeti toplamdan çıkarılmaz.
-- 5 dakikalık bar ile 60 saniyelik istek reddedilir.
-- Yetersiz veri/maliyet veya desteklenmeyen tarihsel kural açık status üretir.
-- Yöntem duyarlılığı ve gerçek geçmiş sonuçları ayrı raporlanır.
-- Süre/RAM limiti işi gerçekten durdurur; collector/ledger etkilenmez.
-- Replay çıktıları ve mevcut risk/decision testleri değişmeden geçer.
+## Acceptance scenarios — required during implementation, not passed yet
 
-Önce bu sözleşme ve kaynak kaydını koru; sonra şemalar/config, saf simülasyon çekirdeği,
-fixture testleri, tarihsel kural adapter'ı ve offline rapor sırasıyla uygula.
+- Fixed data/plan/config/seed produce identical results; changed input gets a new fingerprint.
+- Adding post-as_of data does not change results; exclude open/gap bars.
+- Stop-first; gaps below stops may lose more than −1R; include entry/exit fees and slippage.
+- target + stop + open = 1; retain horizon-open PnL and costs in totals.
+- Reject a 60s request with five-minute bars.
+- Explicit statuses for insufficient data/costs or unsupported historical rules.
+- Report method sensitivity separately from real historical results.
+- Time/RAM limits actually terminate work without affecting collector/ledger.
+- Existing replay outputs and risk/decision tests remain unchanged and pass.
+
+Preserve this contract/source record first; then implement schemas/config, the pure
+simulation core, fixture tests, historical-rule adapter and offline reports in order.

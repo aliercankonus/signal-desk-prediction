@@ -1,8 +1,8 @@
 # 04 — Resource, Retention and 200 GB Migration
 
-## Başlangıç profili: 100 GB disk / 2 GB RAM
+## Initial profile: 100 GB disk / 2 GB RAM
 
-| Alan | Bütçe |
+| Area | Budget |
 |---|---:|
 | Raw Zstd events | 30 GB |
 | Feature/label data | 12 GB |
@@ -14,11 +14,11 @@
 | Emergency reserve | 20 GB |
 | Spare | 5 GB |
 
-## 200 GB profili
+## 200 GB profile
 
-200 GB’a geçilirse amaç 60 günlük raw replay’i daha rahat desteklemek ve araştırma pencerelerini silme baskısı olmadan yürütmektir.
+The 200 GB profile aims to better support 60 days of raw replay and reduce deletion pressure on research windows.
 
-| Alan | 100 GB | 200 GB |
+| Area | 100 GB | 200 GB |
 |---|---:|---:|
 | Raw Zstd events | 30 GB | 90 GB |
 | Feature/labels | 12 GB | 24 GB |
@@ -30,38 +30,38 @@
 | Emergency reserve | 20 GB | 25 GB |
 | Spare | 5 GB | 2 GB |
 
-## Migration tetikleyicileri
+## Migration triggers
 
-200 GB’a geçiş öner:
+Recommend migration to 200 GB when:
 
-- 3 gün üst üste sıkıştırılmış raw veri > 1 GB/gün.
-- 60 günlük raw replay isteniyorsa.
-- Disk %70 üstünde yeni deneyler erteleniyorsa.
-- Feature/label pin’leri raw retention’ı 7 gün altına düşürüyorsa.
+- Compressed raw data exceeds 1 GB/day for three consecutive days.
+- 60-day raw replay is required.
+- Disk usage above 70% delays new experiments.
+- Feature/label pins reduce raw retention below seven days.
 
-## Disk aksiyonları
+## Disk actions
 
-| Eşik | Aksiyon |
-|---|---|
-| >70% | Yeni büyük araştırma başlatma; retention raporu üret |
-| >85% | ENTER BLOCK; yeni giriş yok |
-| >90% | Maintenance mode; cleanup/backup doğrula |
-| >95% | HALT; collector hariç riskli yazıcıları durdur veya read-only moda al |
+| Threshold | Action |
+| --- | --- |
+| >70% | Do not start large research jobs; produce a retention report |
+| >85% | ENTER BLOCK; no new entries |
+| >90% | Maintenance mode; verify cleanup/backup |
+| >95% | HALT; stop risky writers other than the collector, or make them read-only |
 
-## RAM kuralları
+## RAM rules
 
-- Redis başlangıçta yok.
-- Toplam live cache en fazla 64 MiB.
-- Engine container hedef RSS ≤512 MiB.
+- No Redis initially.
+- Total live cache at most 64 MiB.
+- Engine container target RSS ≤512 MiB.
 - API ≤192 MiB.
-- Tek bakım worker ≤384 MiB.
-- Ağır eğitim VPS dışında yapılır.
+- One maintenance worker ≤384 MiB.
+- Heavy training runs outside the VPS.
 
-## Migration kabulü
+## Migration acceptance
 
-1. Yedek alınır.
-2. Yeni disk alanı doğrulanır.
-3. Docker volumes ve paths değişmeden büyür veya restore edilir.
-4. `docker compose up -d --wait`.
-5. Raw/feature/model manifest hash kontrolü.
-6. EOD ve paper ledger idempotency kontrolü.
+1. Create a backup.
+2. Verify the new disk space.
+3. Expand or restore Docker volumes without changing their paths.
+4. Run `docker compose up -d --wait`.
+5. Verify raw/feature/model manifest hashes.
+6. Verify EOD and paper ledger idempotency.

@@ -1,20 +1,21 @@
 # 08 — Risk and Decision Engine
 
-## Kararlar
+## Decisions
 
-- `ENTER`: Yeni paper pozisyon açma niyeti.
-- `HOLD`: Mevcut pozisyonu koru.
-- `UPDATE_STOP`: Pozisyonu kapatmadan stop korumasını güncelle.
-- `EXIT`: Açık pozisyonu kapatma/azaltma isteği.
-- `WAIT`: Fırsat yok.
-- `BLOCK`: Veri, risk, config veya sistem sorunu nedeniyle yeni giriş engeli.
-- `HALT`: Kritik sistem durumu; yeni risk alınmaz.
+- `ENTER`: intent to open a new paper position.
+- `HOLD`: retain the current position.
+- `UPDATE_STOP`: update stop protection without closing the position.
+- `EXIT`: request closure/reduction of an open position.
+- `WAIT`: no opportunity.
+- `BLOCK`: prevent new entries because of data, risk, config or system problems.
+- `HALT`: critical system state; take no new risk.
 
-## Durumlar
+## States
 
-Mode, position state, order intent state, ledger state ve risk latch ayrı saklanır.
+Persist mode, position state, order intent state, ledger state, and risk latch separately.
 
 Position:
+
 - `FLAT`
 - `OPENING`
 - `OPEN`
@@ -23,6 +24,7 @@ Position:
 - `RECOVERING`
 
 Order intent:
+
 - `PLANNED`
 - `RISK_RESERVED`
 - `PENDING_SEND`
@@ -34,7 +36,7 @@ Order intent:
 - `REJECTED`
 - `UNKNOWN`
 
-## Öncelik sırası
+## Priority order
 
 1. Ledger write failure → HALT.
 2. Recovery/reconciliation incomplete → BLOCK.
@@ -45,31 +47,31 @@ Order intent:
 7. Strategy ENTER.
 8. HOLD/WAIT.
 
-## Risk varsayılanları
+## Risk defaults
 
-- Risk/trade: 0.25% start/current equity policy config ile belirlenir.
-- Daily loss: 1.0% start-of-day equity.
-- Max notional: 10% equity.
+- Risk/trade: 0.25% of starting/current equity, as selected by config policy.
+- Daily loss: 1.0% of start-of-day equity.
+- Max notional: 10% of equity.
 - Max open positions: 1.
 - Re-entry cooldown: 60s.
-- After stop cooldown: 300s.
+- After-stop cooldown: 300s.
 
-Bunlar paper başlangıç parametreleridir; optimum değildir.
+These are initial paper parameters, not validated optima.
 
-## Günlük zarar davranışı
+## Daily loss behavior
 
-Daily loss tetiklenirse:
+When the daily loss limit triggers:
 
-- Yeni ENTER BLOCK.
-- Bekleyen girişler iptal edilir.
-- Açık miktar için EXIT istenir.
-- Veri bayatsa çıkış tamamlanmış gösterilmez; state `UNCERTAIN/RECOVERING` kalır.
+- BLOCK new ENTER decisions.
+- Cancel pending entries.
+- Request EXIT for the open quantity.
+- If data is stale, do not report exit completion; retain `UNCERTAIN/RECOVERING` state.
 
-Günlük zarar hesabı gerçekleşmiş PnL ve güvenilir mark-to-market açık PnL’yi ayrı saklar; aynı kayıp iki kez düşülmez.
+Store realized PnL and reliable mark-to-market open PnL separately; do not subtract the same loss twice.
 
-## İdempotency
+## Idempotency
 
-Order intent id şu alanların hash’inden türetilmelidir:
+Derive the order intent ID from a hash of these fields:
 
 - strategy_id
 - signal_id
@@ -81,11 +83,11 @@ Order intent id şu alanların hash’inden türetilmelidir:
 - intended_qty
 - stop/tp/time_stop plan hash
 
-Aynı intent belirsiz kaldıysa yeni kimlikle tekrar gönderilmez; önce ledger/reconcile yapılır.
+If an intent remains uncertain, do not resend it with a new identity; reconcile against the ledger first.
 
 ## Risk parameter change policy
 
-- Her risk değişikliği yeni `risk_config_version` üretir.
-- Açık pozisyon varsa eski risk planı saklanır; yeni girişler yeni config ile değerlendirilir.
-- Daily loss limiti düşürülürse hemen uygulanır.
-- Daily loss limiti artırılırsa manual approval gerekir.
+- Every risk change creates a new `risk_config_version`.
+- Preserve the old risk plan for open positions; evaluate new entries with the new config.
+- Apply a lower daily loss limit immediately.
+- Increasing the daily loss limit requires manual approval.

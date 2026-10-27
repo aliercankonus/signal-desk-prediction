@@ -1,8 +1,8 @@
 # 03 — Central Config Contract
 
-Tüm ayarlar tek merkezden okunur: `config.yaml`. Kod içine gizli varsayılan yazma.
+Read all settings centrally from `config.yaml`. Do not hide defaults in code.
 
-## Zorunlu config alanları
+## Required config fields
 
 ```yaml
 project:
@@ -68,9 +68,9 @@ alarms:
   ram_halt_pct: 95
 ```
 
-## Config versiyonlama
+## Config versioning
 
-- Her değişiklik `config_version` üretir.
-- Risk parametresi değişikliği paper modda bile manifest’e yazılır.
-- Açık pozisyon varken stop/risk config değişirse mevcut pozisyona etkisi ayrıca kayıt edilir.
-- Günlük zarar limitini artırmak manuel onay gerektirir; düşürme hemen uygulanabilir.
+- Every change creates a `config_version`.
+- Record risk-parameter changes in the manifest, even in paper mode.
+- If stop/risk config changes with an open position, record the effect on that position separately.
+- Increasing the daily loss limit requires manual approval; decreases may apply immediately.

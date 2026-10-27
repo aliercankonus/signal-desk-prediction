@@ -1,33 +1,33 @@
 # 11 — Observability and Alarms
 
-## Alarm seviyeleri
+## Alarm levels
 
-| Seviye | Anlam | Aksiyon |
-|---|---|---|
-| INFO | Normal bilgi | Logla |
-| WARN | İncelenecek durum | EOD’ye ekle |
-| BLOCK | Yeni ENTER yasak | Açık risk azaltma devam edebilir |
-| HALT | Kritik | Yeni risk yok; maintenance/recovery |
+| Level | Meaning | Action |
+| --- | --- | --- |
+| INFO | Normal information | Log |
+| WARN | Needs investigation | Include in EOD |
+| BLOCK | No new ENTER | Open risk reduction may continue |
+| HALT | Critical | No new risk; maintenance/recovery |
 
-## Otomatik aksiyonlar
+## Automatic actions
 
-| Durum | Alarm | Aksiyon |
-|---|---|---|
-| L2 stale | BLOCK | Yeni ENTER yok; resync |
-| Trades stale | BLOCK | Yeni ENTER yok |
+| Condition | Alarm | Action |
+| --- | --- | --- |
+| L2 stale | BLOCK | No new ENTER; resync |
+| Trades stale | BLOCK | No new ENTER |
 | Heartbeat missed | BLOCK | Reconnect/resync |
-| Binance gap | BLOCK | Local book discard + bootstrap |
-| Disk >85% | BLOCK | Yeni giriş yok |
+| Binance gap | BLOCK | Discard local book and bootstrap |
+| Disk >85% | BLOCK | No new entries |
 | Disk >95% | HALT | Maintenance |
-| Ledger write error | HALT | Tüm order intent durur |
-| Model unavailable | WARN/BLOCK | Prediction unavailable; strategy ENTER yok |
-| Fee stale/missing | BLOCK | Yeni ENTER yok |
-| Recovery incomplete | BLOCK | Reconcile bitene kadar yeni giriş yok |
+| Ledger write error | HALT | Stop all order intents |
+| Model unavailable | WARN/BLOCK | Prediction unavailable; no strategy ENTER |
+| Fee stale/missing | BLOCK | No new ENTER |
+| Recovery incomplete | BLOCK | No new entries until reconciliation completes |
 | RAM >95% | HALT | Worker restart/maintenance |
-| Config invalid | HALT | Başlatma fail-closed |
-| Schema validation error | HALT for writer | Bozuk event quarantine |
+| Config invalid | HALT | Fail closed at startup |
+| Schema validation error | HALT for writer | Quarantine the invalid event |
 
-## Zorunlu metrikler
+## Required metrics
 
 - decision_latency p50/p95/p99
 - market_data_age_ms
@@ -49,5 +49,5 @@
 
 - `/health/live`: process alive.
 - `/health/ready`: config + storage + market data + ledger + mode ready.
-- `/health/paper`: paper-only and execution disabled confirmation.
+- `/health/paper`: paper-only and execution-disabled confirmation.
 - `/metrics`: Prometheus-compatible text or JSON metrics.
