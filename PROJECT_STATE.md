@@ -50,13 +50,14 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 ## Next task
 
 A hostname-only authenticated SSH check succeeded from the agent container; it
-does not authorize deployment. Restricted status/validate/deploy gateway files are
-prepared locally but not installed on the VPS. The VPS root operator must review
-and install them separately, after synchronizing the files. Then verify the
-restricted operations before any deployment. Independent clean-host installation
-and restore remain pending; build bounded combined depth/trade replay before
-claiming live/replay parity. The collector remains idle by default. No 24h
-service or live execution is enabled by source-file changes or merges.
+does not authorize deployment. PR #6 prepares a protected-release gateway design:
+the VPS root operator must separately clone a reviewed full commit SHA outside
+Hermes mounts, approve root-only config and manifest, then activate SSH. No host
+setup, validation or deployment has been performed by this PR. The writable
+development checkout is not the privileged deployment checkout and is not
+re-owned. Independent clean-host installation and restore remain pending; build
+bounded combined depth/trade replay before claiming live/replay parity. The
+collector remains idle by default; live execution stays disabled.
 
 ## Records and ownership
 - INSTALLATION.md: canonical repeatable install procedure.

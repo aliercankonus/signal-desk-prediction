@@ -98,78 +98,150 @@ no down -v, prune, reset or remove-orphans is used. API health failure does not
 automatically roll back images; logs and the previous image ID are retained.
 Returning to a previous image or restoring data requires separate review.
 
-## Restricted SSH host-command gateway (separate one-time root setup)
+## Restricted SSH host-command gateway (operator approval, separate from install)
 
-The gateway is **not** part of the application installer. Copy/review these
-repository files in the existing VPS checkout first. In a VPS **root terminal**,
-from that checkout, run exactly this command, replacing only the configurable
-values with the actual existing account, key comment, independently verified
-key fingerprint, Compose project and host:
+Keep the Hermes development checkout writable and unchanged. It is **never** the
+host deployment checkout. Only the VPS root operator may prepare a second,
+root-owned checkout under `/srv/signal-desk-releases/`, outside every mount
+visible to the Hermes container. The checkout, its ancestors, Git metadata,
+code and configuration must be root-owned and not group/world writable. The
+release guard checks these conditions, the pinned agent-container mounts and the
+existing project volume before every operation. Do not change ownership of
+the development checkout.
 
-```bash
-bash scripts/install-host-gateway.sh --repo "$PWD" --agent-user "${AGENT_USER:?set dedicated SSH account}" --key-comment "${KEY_COMMENT:?set existing key comment}" --key-fingerprint "${KEY_FINGERPRINT:?set trusted SHA256 public-key fingerprint}" --project "${PROJECT:?set existing COMPOSE_PROJECT_NAME}" --expected-host "$(hostname)"
-```
-
-For the existing dedicated key, `KEY_COMMENT=hermes-signal-desk` is the public
-key's comment. Derive `KEY_FINGERPRINT` from the trusted public key outside the
-VPS (for example, `ssh-keygen -lf /path/to/key.pub -E sha256`); do not trust
-only the host's existing authorized_keys entry for key selection. Set `PROJECT`
-to the value in the existing `.env`, not a new project name. This script
-requires an existing checkout, `.env`, active config, SSH account and exactly
-one active authorized key with that comment. It does not
-create a user, install Docker, update source or deploy the application. Review
-its effects before running: it makes the dedicated account's home and SSH files
-root-owned, installs a root-owned forced-command dispatcher and root gateway in
-`/usr/local/libexec/signal-desk/`, a root-only settings file under
-`/etc/signal-desk/`, and three exact sudoers entries under `/etc/sudoers.d/`.
-It replaces the one existing hostname-only authorized key with
-`restrict,command=...` and refuses additional active keys or unexpected key
-options; it does not silently discard a `from=` restriction. The forced key is
-published before sudoers privileges, so an interrupted first installation fails
-closed. It checks that the dedicated account cannot write the checkout, Git
-metadata, critical inputs or home ancestors. No Docker-group membership or
-unrestricted sudo is granted. If the account's home holds other data, inspect
-it before changing ownership; use an account dedicated to this gateway.
-
-From the agent container, configure **locally** (never commit the key or host
-identity):
+In a **VPS root terminal**, select a reviewed **full 40-character commit SHA**,
+trusted Git remote and existing Compose project. Stage the operator-approved
+`.env` and `config/config.yaml` in a root-only directory outside Hermes mounts.
+Copy them from the existing host configuration into a root-only staging tree
+first, after private review; point `OLD_HOST_CHECKOUT` at that staged tree. The
+preflight refuses symlinks, writable ancestry or non-root-owned source files.
+Do not print their contents or turn on shell tracing. The project, port and bind values
+in `.env` are retained. Example with configurable values (not an agent command):
 
 ```bash
-SSH_HOST=your-host-or-reachable-gateway
-SSH_USER=your-dedicated-agent-user
-SSH_KEY=/path/to/dedicated-private-key
-SSH_KNOWN_HOSTS=/path/to/pinned-known-hosts
-ssh -T -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
-  "$SSH_USER@$SSH_HOST" status
-# Replace status with validate or deploy only after reviewing the operation.
+set -euo pipefail
+umask 077
+APPROVED_SHA=your-reviewed-full-commit-sha
+[[ $APPROVED_SHA =~ ^[0-9a-f]{40}$ ]] || { echo 'Full reviewed SHA required' >&2; exit 1; }
+REMOTE=https://github.com/your-org/signal-desk-prediction.git
+DEPLOY_DIR="/srv/signal-desk-releases/$APPROVED_SHA"
+APPROVED_CONFIG=/etc/signal-desk/operator-config
+SETTINGS="/etc/signal-desk/releases/$APPROVED_SHA.json"
+OLD_HOST_CHECKOUT=/path/to/root-only-staged-existing-host-config
+AGENT_CONTAINER=your-Hermes-container-name
+PROJECT=your-existing-COMPOSE_PROJECT_NAME
+EXPECTED_HOST=$(hostname)
+# Independent preflight before creating the release or copying secrets.
+python3 - "$DEPLOY_DIR" "$AGENT_CONTAINER" "$OLD_HOST_CHECKOUT" <<'PY'
+import json, os, pathlib, stat, subprocess, sys
+release = pathlib.Path(sys.argv[1])
+for path in (release, *release.parents):
+    if not path.exists():
+        continue
+    mode = os.lstat(path)
+    assert mode.st_uid == 0 and not mode.st_mode & 0o022 and not stat.S_ISLNK(mode.st_mode), path
+for source in (pathlib.Path(sys.argv[3]) / '.env', pathlib.Path(sys.argv[3]) / 'config/config.yaml'):
+    for path in (source, *source.parents):
+        mode = os.lstat(path)
+        assert mode.st_uid == 0 and not stat.S_ISLNK(mode.st_mode), path
+        assert not mode.st_mode & (0o077 if path == source else 0o022), path
+protected_destinations = [pathlib.Path('/usr/local/libexec/signal-desk'), pathlib.Path('/etc/signal-desk'), pathlib.Path('/etc/sudoers.d')]
+for destination in protected_destinations:
+    for path in (destination, *destination.parents):
+        if not path.exists():
+            continue
+        mode = os.lstat(path)
+        assert mode.st_uid == 0 and not mode.st_mode & 0o022 and not stat.S_ISLNK(mode.st_mode), path
+containers = [sys.argv[2]] + subprocess.check_output(['docker', 'ps', '-aq', '--filter', 'name=hermes-agent'], text=True).splitlines()
+for container in containers:
+    mounts = json.loads(subprocess.check_output(['docker', 'inspect', '--format', '{{json .Mounts}}', container], text=True))
+    for mount in mounts:
+        source = pathlib.Path(mount['Source']).resolve()
+        for path in (release, pathlib.Path(sys.argv[3]).resolve(), *protected_destinations):
+            assert not (path == source or path.is_relative_to(source) or source.is_relative_to(path)), source
+PY
+install -d -o root -g root -m 700 /srv/signal-desk-releases /etc/signal-desk /etc/signal-desk/releases "$APPROVED_CONFIG"
+install -o root -g root -m 600 "$OLD_HOST_CHECKOUT/.env" "$APPROVED_CONFIG/.env"
+install -o root -g root -m 600 "$OLD_HOST_CHECKOUT/config/config.yaml" "$APPROVED_CONFIG/config.yaml"
+git clone --no-checkout -- "$REMOTE" "$DEPLOY_DIR"
+git -C "$DEPLOY_DIR" checkout --detach "$APPROVED_SHA"
+test "$(git -C "$DEPLOY_DIR" rev-parse HEAD)" = "$APPROVED_SHA"
+test -z "$(git -C "$DEPLOY_DIR" status --porcelain --untracked-files=all)"
+# Independent bootstrap preflight: no code from the candidate checkout runs yet.
+python3 - "$DEPLOY_DIR" "$AGENT_CONTAINER" <<'PY'
+import json, os, pathlib, stat, subprocess, sys
+release = pathlib.Path(sys.argv[1])
+for path in (release, *release.parents):
+    mode = os.lstat(path)
+    assert mode.st_uid == 0 and not mode.st_mode & 0o022 and not stat.S_ISLNK(mode.st_mode), path
+for root, dirs, files in os.walk(release, followlinks=False):
+    for path in (pathlib.Path(root) / name for name in dirs + files):
+        mode = os.lstat(path)
+        assert mode.st_uid == 0 and not mode.st_mode & 0o022 and not stat.S_ISLNK(mode.st_mode), path
+PY
+install -d -o root -g root -m 755 /usr/local/libexec/signal-desk
+install -o root -g root -m 755 "$DEPLOY_DIR/scripts/host_release_guard.py" /usr/local/libexec/signal-desk/release-guard.py
+# The root-owned verifier is now separate from the candidate checkout.
+bash "$DEPLOY_DIR/scripts/prepare-host-release.sh" --dir "$DEPLOY_DIR" \
+  --commit "$APPROVED_SHA" --config-dir "$APPROVED_CONFIG" \
+  --agent-container "$AGENT_CONTAINER" --project "$PROJECT" \
+  --expected-host "$EXPECTED_HOST" --settings "$SETTINGS"
 ```
 
-`status` reports this project's Compose state; `validate` checks Compose,
-builds the collector image from the reviewed checkout, then runs application
-validation and pytest in disposable collector containers; `deploy`
-invokes the existing guarded `scripts/deploy.sh` with the pinned project/host,
-builds images, runs bounded smoke tests and starts only the API. Each SSH command
-must consist of exactly one word: `status`, `validate` or `deploy`; shell text,
-extra flags and other commands are denied. The root gateway requires an existing
-`.env` with the same Compose project and active paper-only config. It never uses
-`down -v`, prune or a new project name; it does not start continuous collection.
-The deployment script retains its own clean-code, running-collector and health
-gates and writes evidence under `runtime/install`. Both `validate` and `deploy`
-refuse tracked code changes (except active config) and untracked files; synchronize
-and commit reviewed code before using them. `status` remains available without a
-source update.
+Clone/checkout is an **explicit root-terminal action**, never an SSH gateway
+operation. The standalone preflight verifies the reviewed SHA, root-owned
+non-replaceable paths, and mount isolation **before any checkout Python or shell
+code is executed as root**. The guard is installed independently as a root-owned
+copy; preparation and activation invoke that copy, never the candidate guard.
+Use a new path per release; neither the old checkout nor Docker
+volumes are removed or re-owned. `prepare-host-release.sh` rejects an unclean or
+wrong checkout, exposed/writable paths, unapproved configuration, project
+mismatch, a missing/changed agent container, or a missing existing API service
+using the named project volume. It pins the volume mountpoint and creation time
+and refuses a replaced volume on later operations. It copies config with mode 0600,
+checks paper mode and disabled execution, then writes a root-only manifest with
+the full SHA, project, host, container ID and config hashes. It does not start
+Docker services, alter SSH authorization or log secrets. If a step fails,
+inspect the partial root-owned checkout; no automatic rollback is promised.
 
-**Security boundary:** deployment and validation execute repository code through
-Docker with host/root privileges. Filtering SSH commands is not a sandbox for
-repository content. Treat the checkout, Dockerfile, Compose file, `.env`, scripts
-and dependency sources as privileged inputs: protect them against writes by the
-agent account, review the exact commit and changes before `validate` or `deploy`,
-and keep host backups. The setup cannot prove clean-host install or restore.
-After setup, verify forced-command rejection of unexpected arguments and test
-`status` before permitting `validate` or `deploy`. An existing `ForceCommand`,
-`AuthorizedKeysCommand`, alternative auth path or pre-existing sudo privilege
-needs separate host-side review; this installer does not audit global sshd policy.
+Only after reviewing that protected checkout and manifest, the root operator
+may **separately** install the forced-command gateway:
+
+```bash
+AGENT_USER=your-dedicated-ssh-user
+KEY_COMMENT=your-public-key-comment
+KEY_FINGERPRINT=SHA256:your-independently-verified-key-fingerprint
+bash "$DEPLOY_DIR/scripts/install-host-gateway.sh" --settings "$SETTINGS" \
+  --agent-user "$AGENT_USER" --key-comment "$KEY_COMMENT" \
+  --key-fingerprint "$KEY_FINGERPRINT"
+```
+
+Derive the fingerprint from a trusted public key outside the VPS, not merely
+from `authorized_keys`. The activation script checks **each shell script
+separately** with `bash -n` before touching authorization. It requires one
+hostname-only restricted ed25519 key, refuses other key options, and publishes
+its new forced command before the three exact sudoers privileges. Activation
+is one-shot: an existing or partially activated gateway is never overwritten;
+root must inspect and resolve it separately. Installed
+executables and settings are root-owned, not writable by Hermes or the SSH
+account. It does not grant Docker-group membership or unrestricted sudo.
+Inspect any partial state after failure. Existing sshd policy, alternate keys
+and prior sudo grants need separate host-side review.
+
+Once the root operator has installed and tested the gateway, the agent can use
+exactly `status`, `validate` or `deploy`, with no flags. The installed verifier
+checks the approved full SHA, root ownership, protected ancestry, Hermes mount
+isolation, clean code and approved config hashes **before** running Compose or
+repository code. SSH has no fetch, checkout, release selection or promotion
+operation. `validate` builds and tests the collector; `deploy` runs the existing
+bounded paper-only deploy script against the **same** Compose project/volume.
+These are future procedures, not evidence that a host setup has occurred.
+
+**Security boundary:** Docker-backed validation/deployment executes the approved
+repository code with host privileges. Command filtering is not a sandbox. A
+clean Git working tree is insufficient without commit and path approval. Keep
+paper mode and `execution_enabled=false`; preserve the old checkout and data
+volume. Clean-host installation and restore remain unverified.
 
 ## Limitations
 
