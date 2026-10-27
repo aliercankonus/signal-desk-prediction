@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RiskState",
+  "type": "object",
+  "required": [
+    "risk_state_id",
+    "asof_ts",
+    "config_version",
+    "equity_usdt",
+    "daily_realized_pnl_usdt",
+    "daily_unrealized_pnl_usdt",
+    "open_risk_usdt",
+    "daily_loss_latched",
+    "can_enter"
+  ],
+  "properties": {
+    "risk_state_id": {
+      "type": "string"
+    },
+    "asof_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "config_version": {
+      "type": "string"
+    },
+    "equity_usdt": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "daily_realized_pnl_usdt": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "daily_unrealized_pnl_usdt": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "open_risk_usdt": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "reserved_risk_usdt": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "daily_loss_latched": {
+      "type": "boolean"
+    },
+    "can_enter": {
+      "type": "boolean"
+    },
+    "latch_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

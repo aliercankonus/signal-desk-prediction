@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Prediction",
+  "type": "object",
+  "required": [
+    "prediction_id",
+    "feature_id",
+    "model_id",
+    "asof_ts",
+    "horizon_seconds",
+    "outputs"
+  ],
+  "properties": {
+    "prediction_id": {
+      "type": "string"
+    },
+    "feature_id": {
+      "type": "string"
+    },
+    "model_id": {
+      "type": "string"
+    },
+    "model_version": {
+      "type": "string"
+    },
+    "asof_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "horizon_seconds": {
+      "type": "integer"
+    },
+    "outputs": {
+      "type": "object"
+    },
+    "calibrated": {
+      "type": "boolean"
+    },
+    "unavailable_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

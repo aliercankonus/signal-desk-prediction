@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FeatureSnapshot",
+  "type": "object",
+  "required": [
+    "feature_id",
+    "asof_ts",
+    "symbol",
+    "feature_version",
+    "data_quality",
+    "features"
+  ],
+  "properties": {
+    "feature_id": {
+      "type": "string"
+    },
+    "asof_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "symbol": {
+      "const": "BTCUSDT"
+    },
+    "feature_version": {
+      "type": "string"
+    },
+    "source_event_id": {
+      "type": "string"
+    },
+    "horizon_seconds": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "data_quality": {
+      "type": "object"
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "number",
+          "integer",
+          "string",
+          "boolean",
+          "null"
+        ]
+      }
+    }
+  }
+}

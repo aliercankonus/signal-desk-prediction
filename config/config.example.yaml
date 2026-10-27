@@ -1,0 +1,100 @@
+project:
+  name: signal-desk-prediction
+  version: v16
+  mode: paper
+  execution_enabled: false
+  config_version: cfg-v16-example-001
+
+exchange:
+  name: binance
+  product_type: spot
+  symbol: BTCUSDT
+  quote_asset: USDT
+  endpoints:
+    rest_base_url: https://api.binance.com
+    ws_base_url: wss://stream.binance.com:9443
+  market_data:
+    depth_stream: btcusdt@depth@100ms
+    trade_stream: btcusdt@trade
+    snapshot_limit: 5000
+    heartbeat_timeout_ms: 3000
+    stale_l2_ms: 2000
+    stale_trades_ms: 3000
+
+fees:
+  maker_bps: 10.0
+  taker_bps: 10.0
+  source: manual_placeholder_verify_before_run
+  last_verified_ts: "2026-10-26T00:00:00Z"
+  stale_after_hours: 168
+  stale_policy: block_enter
+
+filters:
+  source: binance_exchange_info
+  require_on_startup: true
+
+resources:
+  profile: 100gb_2gb
+  disk_total_gb: 100
+  ram_total_mb: 2048
+  cache_total_mib: 64
+  docker_memory_limits_required: true
+
+storage:
+  base_path: /data
+  raw_path: /data/raw
+  feature_path: /data/features
+  ledger_path: /data/ledger
+  model_path: /data/models
+  report_path: /data/reports
+  backup_path: /data/backups
+  raw_codec: zstd
+  feature_format: parquet
+  ledger_store: sqlite_wal
+
+retention:
+  raw_target_days: 7
+  raw_pool_gb: 30
+  feature_days: 30
+  feature_pool_gb: 12
+  minute_aggregate_days: 180
+  prediction_days: 30
+  eod_days: 365
+
+risk:
+  starting_equity_usdt: "10000"
+  risk_per_trade_pct: 0.25
+  daily_loss_limit_pct: 1.0
+  max_position_notional_pct: 10
+  max_open_positions: 1
+  reentry_cooldown_seconds: 60
+  after_stop_cooldown_seconds: 300
+
+paper_fill:
+  mode: conservative
+  slippage_model: conservative_spread_based
+  same_interval_stop_target_ordering: stop_first
+  partial_fill_enabled: true
+  markout_seconds: [1, 5, 30, 60, 300]
+
+strategy:
+  enabled: [S0, S1]
+  primary: S1
+  horizons_seconds: [60, 300]
+  decision_frequency_hz: 1
+
+models:
+  active: baseline_no_change
+  allow_unavailable: true
+
+alarms:
+  disk_warn_pct: 70
+  disk_enter_block_pct: 85
+  disk_halt_pct: 95
+  ram_warn_pct: 80
+  ram_halt_pct: 95
+
+eod:
+  timezone: UTC
+  local_display_timezone: Europe/Amsterdam
+  revision_on_reconcile: true

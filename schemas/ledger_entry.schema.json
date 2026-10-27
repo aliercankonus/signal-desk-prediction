@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LedgerEntry",
+  "type": "object",
+  "required": [
+    "ledger_id",
+    "ts",
+    "entry_type",
+    "symbol",
+    "config_version",
+    "amounts",
+    "hash"
+  ],
+  "properties": {
+    "ledger_id": {
+      "type": "string"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "entry_type": {
+      "enum": [
+        "intent_created",
+        "risk_reserved",
+        "paper_fill",
+        "cancel_requested",
+        "cancelled",
+        "position_opened",
+        "position_closed",
+        "mark_to_market",
+        "reconcile",
+        "eod_adjustment"
+      ]
+    },
+    "symbol": {
+      "const": "BTCUSDT"
+    },
+    "intent_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fill_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "config_version": {
+      "type": "string"
+    },
+    "amounts": {
+      "type": "object"
+    },
+    "position_state_after": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hash": {
+      "type": "string"
+    },
+    "prev_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

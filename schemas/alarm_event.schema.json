@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AlarmEvent",
+  "type": "object",
+  "required": [
+    "alarm_id",
+    "ts",
+    "severity",
+    "code",
+    "action"
+  ],
+  "properties": {
+    "alarm_id": {
+      "type": "string"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "severity": {
+      "enum": [
+        "INFO",
+        "WARN",
+        "BLOCK",
+        "HALT"
+      ]
+    },
+    "code": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "resolved_ts": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "context": {
+      "type": "object"
+    }
+  }
+}

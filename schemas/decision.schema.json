@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Decision",
+  "type": "object",
+  "required": [
+    "decision_id",
+    "asof_ts",
+    "decision",
+    "reason_codes",
+    "risk_state_id",
+    "config_version"
+  ],
+  "properties": {
+    "decision_id": {
+      "type": "string"
+    },
+    "asof_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "decision": {
+      "enum": [
+        "ENTER",
+        "HOLD",
+        "UPDATE_STOP",
+        "EXIT",
+        "WAIT",
+        "BLOCK",
+        "HALT"
+      ]
+    },
+    "position_state": {
+      "type": "string"
+    },
+    "order_intent_state": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason_codes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "blocked_by": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risk_state_id": {
+      "type": "string"
+    },
+    "prediction_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "strategy_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "config_version": {
+      "type": "string"
+    },
+    "decision_latency_ms": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "market_data_age_ms": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "cost_gate_result": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "valid_until": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "telemetry": {
+      "type": "object"
+    }
+  }
+}

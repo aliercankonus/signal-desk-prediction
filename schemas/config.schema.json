@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RuntimeConfig",
+  "type": "object",
+  "required": [
+    "project",
+    "exchange",
+    "fees",
+    "resources",
+    "storage",
+    "risk",
+    "paper_fill",
+    "strategy",
+    "alarms"
+  ],
+  "properties": {
+    "project": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "mode",
+        "execution_enabled",
+        "config_version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "mode": {
+          "const": "paper"
+        },
+        "execution_enabled": {
+          "const": false
+        },
+        "config_version": {
+          "type": "string"
+        }
+      }
+    },
+    "exchange": {
+      "type": "object",
+      "required": [
+        "name",
+        "product_type",
+        "symbol"
+      ],
+      "properties": {
+        "name": {
+          "const": "binance"
+        },
+        "product_type": {
+          "const": "spot"
+        },
+        "symbol": {
+          "const": "BTCUSDT"
+        }
+      }
+    },
+    "fees": {
+      "type": "object",
+      "required": [
+        "maker_bps",
+        "taker_bps",
+        "source",
+        "last_verified_ts",
+        "stale_after_hours"
+      ],
+      "properties": {
+        "maker_bps": {
+          "type": "number"
+        },
+        "taker_bps": {
+          "type": "number"
+        },
+        "source": {
+          "type": "string"
+        },
+        "last_verified_ts": {
+          "type": "string"
+        },
+        "stale_after_hours": {
+          "type": "integer"
+        }
+      }
+    },
+    "resources": {
+      "type": "object"
+    },
+    "storage": {
+      "type": "object"
+    },
+    "risk": {
+      "type": "object"
+    },
+    "paper_fill": {
+      "type": "object"
+    },
+    "strategy": {
+      "type": "object"
+    },
+    "alarms": {
+      "type": "object"
+    }
+  }
+}

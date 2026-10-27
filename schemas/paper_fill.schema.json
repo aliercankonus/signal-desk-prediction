@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PaperFill",
+  "type": "object",
+  "required": [
+    "fill_id",
+    "intent_id",
+    "fill_ts",
+    "symbol",
+    "side",
+    "qty",
+    "price",
+    "mode",
+    "cumulative_qty",
+    "remaining_qty",
+    "fill_reason"
+  ],
+  "properties": {
+    "fill_id": {
+      "type": "string"
+    },
+    "intent_id": {
+      "type": "string"
+    },
+    "fill_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "symbol": {
+      "const": "BTCUSDT"
+    },
+    "side": {
+      "enum": [
+        "buy",
+        "sell"
+      ]
+    },
+    "qty": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "price": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "cumulative_qty": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "remaining_qty": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "fee": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fee_role": {
+      "enum": [
+        "maker",
+        "taker",
+        "unknown",
+        null
+      ]
+    },
+    "slippage_bps": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "mode": {
+      "enum": [
+        "conservative",
+        "neutral",
+        "optimistic"
+      ]
+    },
+    "fill_reason": {
+      "enum": [
+        "marketable",
+        "touch_volume_proxy",
+        "stop",
+        "take_profit",
+        "time_stop",
+        "manual_reconcile",
+        "unknown"
+      ]
+    },
+    "markout": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

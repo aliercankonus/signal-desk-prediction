@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MarketEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "exchange",
+    "symbol",
+    "product_type",
+    "event_type",
+    "exchange_ts",
+    "received_ts",
+    "monotonic_ns",
+    "payload_hash"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "exchange": {
+      "const": "binance"
+    },
+    "symbol": {
+      "const": "BTCUSDT"
+    },
+    "product_type": {
+      "const": "spot"
+    },
+    "event_type": {
+      "enum": [
+        "trade",
+        "agg_trade",
+        "book_snapshot",
+        "book_delta",
+        "heartbeat",
+        "status"
+      ]
+    },
+    "exchange_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "received_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "monotonic_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "first_update_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "final_update_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "last_update_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "previous_final_update_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "bids": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string",
+            "pattern": "^-?\\d+(\\.\\d+)?$"
+          },
+          {
+            "type": "string",
+            "pattern": "^-?\\d+(\\.\\d+)?$"
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "asks": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string",
+            "pattern": "^-?\\d+(\\.\\d+)?$"
+          },
+          {
+            "type": "string",
+            "pattern": "^-?\\d+(\\.\\d+)?$"
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "trade_id": {
+      "type": [
+        "integer",
+        "string",
+        "null"
+      ]
+    },
+    "aggregate_trade_id": {
+      "type": [
+        "integer",
+        "string",
+        "null"
+      ]
+    },
+    "trade_price": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "trade_qty": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "is_buyer_maker": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "trade_side": {
+      "enum": [
+        "buy",
+        "sell",
+        "unknown",
+        null
+      ]
+    },
+    "payload_hash": {
+      "type": "string"
+    },
+    "raw_stream": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "data_quality": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ModelManifest",
+  "type": "object",
+  "required": [
+    "model_id",
+    "model_version",
+    "feature_version",
+    "label_definition",
+    "training_window",
+    "artifact_hash",
+    "metrics"
+  ],
+  "properties": {
+    "model_id": {
+      "type": "string"
+    },
+    "model_version": {
+      "type": "string"
+    },
+    "feature_version": {
+      "type": "string"
+    },
+    "label_definition": {
+      "type": "object"
+    },
+    "training_window": {
+      "type": "object"
+    },
+    "validation_window": {
+      "type": "object"
+    },
+    "final_test_window": {
+      "type": "object"
+    },
+    "calibration_method": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "artifact_hash": {
+      "type": "string"
+    },
+    "metrics": {
+      "type": "object"
+    },
+    "cost_assumptions": {
+      "type": "object"
+    }
+  }
+}

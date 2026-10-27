@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EODReport",
+  "type": "object",
+  "required": [
+    "report_id",
+    "date",
+    "revision",
+    "symbol",
+    "summary",
+    "data_quality",
+    "strategy_results",
+    "alarms"
+  ],
+  "properties": {
+    "report_id": {
+      "type": "string"
+    },
+    "date": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer"
+    },
+    "symbol": {
+      "const": "BTCUSDT"
+    },
+    "summary": {
+      "type": "object"
+    },
+    "data_quality": {
+      "type": "object"
+    },
+    "strategy_results": {
+      "type": "object"
+    },
+    "model_results": {
+      "type": "object"
+    },
+    "paper_results": {
+      "type": "object"
+    },
+    "alarms": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "generated_ts": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

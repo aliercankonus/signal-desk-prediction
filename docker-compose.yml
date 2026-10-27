@@ -1,0 +1,47 @@
+services:
+  api:
+    build: .
+    command: ["python", "-m", "signal_desk.api.health_server", "--host", "0.0.0.0", "--port", "8080"]
+    env_file: .env
+    environment:
+      SIGNAL_DESK_CONFIG: /app/config/config.yaml
+      PYTHONPATH: /app/src
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/app/config:ro
+      - signal_desk_data:/data
+    mem_limit: 192m
+    healthcheck:
+      test: ["CMD", "python", "-m", "signal_desk.api.healthcheck", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  collector:
+    build: .
+    command: ["python", "-m", "signal_desk.collector.binance_collector", "--mode", "idle"]
+    env_file: .env
+    environment:
+      SIGNAL_DESK_CONFIG: /app/config/config.yaml
+      PYTHONPATH: /app/src
+    volumes:
+      - ./config:/app/config:ro
+      - signal_desk_data:/data
+    mem_limit: 512m
+    depends_on:
+      api:
+        condition: service_healthy
+  maintenance:
+    build: .
+    command: ["sh", "-c", "python -m signal_desk.tools.validate_all && sleep infinity"]
+    env_file: .env
+    environment:
+      SIGNAL_DESK_CONFIG: /app/config/config.yaml
+      PYTHONPATH: /app/src
+    volumes:
+      - ./config:/app/config:ro
+      - signal_desk_data:/data
+    mem_limit: 384m
+volumes:
+  signal_desk_data:

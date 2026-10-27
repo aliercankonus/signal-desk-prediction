@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StorageManifest",
+  "type": "object",
+  "required": [
+    "manifest_id",
+    "created_ts",
+    "profile",
+    "files"
+  ],
+  "properties": {
+    "manifest_id": {
+      "type": "string"
+    },
+    "created_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "profile": {
+      "enum": [
+        "100gb_2gb",
+        "200gb_2gb"
+      ]
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path",
+          "sha256",
+          "bytes"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string"
+          },
+          "retention_pin": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

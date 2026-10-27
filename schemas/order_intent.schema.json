@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OrderIntent",
+  "type": "object",
+  "required": [
+    "intent_id",
+    "created_ts",
+    "symbol",
+    "side",
+    "qty",
+    "state",
+    "fingerprint",
+    "decision_id",
+    "portfolio_version",
+    "valid_until",
+    "expires_at"
+  ],
+  "properties": {
+    "intent_id": {
+      "type": "string"
+    },
+    "created_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "symbol": {
+      "const": "BTCUSDT"
+    },
+    "side": {
+      "enum": [
+        "buy",
+        "sell"
+      ]
+    },
+    "qty": {
+      "type": "string",
+      "pattern": "^-?\\d+(\\.\\d+)?$"
+    },
+    "limit_price": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stop_price": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "take_profit_price": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "time_stop_seconds": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "state": {
+      "enum": [
+        "PLANNED",
+        "RISK_RESERVED",
+        "PENDING_SEND",
+        "ACKED",
+        "PARTIALLY_FILLED",
+        "FILLED",
+        "CANCEL_REQUESTED",
+        "CANCELLED",
+        "REJECTED",
+        "UNKNOWN"
+      ]
+    },
+    "fingerprint": {
+      "type": "string"
+    },
+    "decision_id": {
+      "type": "string"
+    },
+    "portfolio_version": {
+      "type": "string"
+    },
+    "risk_reservation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "config_version": {
+      "type": "string"
+    }
+  }
+}

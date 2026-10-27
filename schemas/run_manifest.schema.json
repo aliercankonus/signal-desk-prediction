@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunManifest",
+  "type": "object",
+  "required": [
+    "run_id",
+    "run_type",
+    "started_ts",
+    "config_version",
+    "code_version",
+    "schemas_version"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string"
+    },
+    "run_type": {
+      "enum": [
+        "live_paper",
+        "replay",
+        "training",
+        "backtest",
+        "eod",
+        "maintenance"
+      ]
+    },
+    "started_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_ts": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "config_version": {
+      "type": "string"
+    },
+    "code_version": {
+      "type": "string"
+    },
+    "schemas_version": {
+      "type": "string"
+    },
+    "input_manifest_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    }
+  }
+}
