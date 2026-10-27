@@ -71,3 +71,10 @@
 - Add receipt/application age, queue, loop-lag, validation/write/IO diagnostics.
 - Preserve last failure diagnostics across resync. Keep freshness/fsync/CPU limits.
 - Local suite 53 passed; first 60s VPS run had two stale resyncs, repeat pending.
+
+## 2026-10-27 — Read-only captured-session audit candidate
+
+- Add record-bounded session filtering, JSON/schema/semantic and sequence checks.
+- Compare expected persisted counts; report incremental file hashes and input changes.
+- Preserve raw data; no event-ID accumulation, full-file list loading or replay claims.
+- Local suite 67 passed and config/schema validation passed; actual host audit pending.

@@ -61,3 +61,7 @@ Bu skill çalışan bir trading bot değildir. Gerçek emir, gerçek para ve API
 ## Sürekli collector adayı
 
 Sürekli toplama, reconnect veya resync işlerinde [collector sözleşmesini](references/17-continuous-collector.md) uygula. Yeni continuous modu yerel testlidir; VPS kabulü bekler. Compose varsayılanı idle kalır. Önce collector image/test, sonra 60 saniyelik sınırlı test; başarı ve kaynak ölçümü olmadan 24/7 kurulum yapma. Time Machine ve gerçek emir kapsamını değiştirme.
+
+## Ham veri kabulü ve replay öncesi kontrol
+
+Kaydedilmiş oturumun bütünlüğü için [raw-session audit sözleşmesini](references/18-data-audit.md) uygula. Önce tamamlanmış collector oturumunu session_id ile seç; sayım, şema, sıra ve dosya hash kontrollerini yap. Araç ham dosyaları değiştirmez. Büyük ham dosyayı listeye yükleyen mevcut replay okuyucusunu bu kontrolün yerine kullanma. Audit başarısı live/replay parity kabulü değildir.
