@@ -37,3 +37,7 @@ Opsiyonel geliştirme/araştırma koordinasyonu. Canlı Decision Engine veya led
 - Timeout alttaki işi durdurmamış olabilir.
 - Restart/snapshot/buffer güvenliği test edilir.
 - Büyük model kârlılık garantisi değildir.
+
+## Time Machine — kabul edilen ek feature
+
+[Time Machine sözleşmesini](16-timemachine.md) uygula: mevcut replay'den ayrı senaryo simülasyonu ve tarihsel kural testi. Kaynak incelendi; BTC uyarlaması tasarım olarak kabul edildi, çalışan simülatör henüz yok.

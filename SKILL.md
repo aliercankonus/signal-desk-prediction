@@ -32,6 +32,7 @@ Bu skill çalışan bir trading bot değildir. Gerçek emir, gerçek para ve API
 13. `references/13-external-methods.md`
 14. `references/14-acceptance-gates.md`
 15. `references/15-research-decision-policy.md`
+16. [Time Machine](references/16-timemachine.md) — replay'den ayrı senaryo ve tarihsel kural araştırması.
 
 ## Geliştirme sırası
 
@@ -52,3 +53,7 @@ Bu skill çalışan bir trading bot değildir. Gerçek emir, gerçek para ve API
 - Kârlılık iddiası üretme; yalnız test sonucu varsa konuş.
 - Her yeni teknik karar araştırılmış kaynak ve `decision_log` girdisiyle eklenmelidir.
 - Binance BTCUSDT V0’dır; futures/perpetual ayrı V1+ deneydir.
+
+## Time Machine feature kararı — 2026-10-27
+
+`timemachine` feature'ını replay modülünden ayrı geliştir. Monte Carlo senaryoları ile gerçek geçmiş kural testini ayrı tut; BTCUSDT spot paper-only, UTC, nedensellik ve maliyet sözleşmesini uygula. [Time Machine sözleşmesini](references/16-timemachine.md) oku. Şimdilik yalnız feature tasarımı kabul edildi; simülatör, şemalar ve testler uygulanmış değildir. VPS smoke testi bu feature'ı beklemez.

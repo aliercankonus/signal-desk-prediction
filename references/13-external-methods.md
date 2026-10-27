@@ -38,3 +38,7 @@ Yalnız offline development/research coordination için opsiyonel. Runtime decis
 ## Araştırma kaynak ekleme kuralı
 
 Her dış yöntem `references/15-research-decision-policy.md` uyarınca decision log girdisi ve kaynakla eklenir.
+
+## Time Machine — kabul edilen ek feature
+
+[Time Machine sözleşmesini](16-timemachine.md) uygula: mevcut replay'den ayrı senaryo simülasyonu ve tarihsel kural testi. Kaynak incelendi; BTC uyarlaması tasarım olarak kabul edildi, çalışan simülatör henüz yok.

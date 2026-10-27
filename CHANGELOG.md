@@ -43,3 +43,10 @@
 - Added collector `stream` mode with max-events guard for public-data smoke tests.
 - Added GitHub setup instructions.
 - No API keys or real order execution added.
+
+## 2026-10-27 — Time Machine feature specification
+
+- Added a separate timemachine research feature contract and pinned source review.
+- Separated synthetic Monte Carlo scenarios from historical strategy-rule tests and existing event replay.
+- Defined BTC/UTC, costs, stop-gap, causality, resource and acceptance requirements.
+- Documentation/skill update only; no simulator implementation or newly passing runtime tests.

@@ -66,3 +66,10 @@
 - Model comparison uses frozen validation/final windows.
 - Final test run once.
 - Negative results preserved.
+
+## TM — Time Machine araştırma kabulü (pending)
+
+G0–G9 durumunu otomatik ilerletmez; ilk VPS smoke testini engellemez.
+references/16-timemachine.md içindeki nedensellik, determinism, horizon, maliyet/gap,
+ayrı tarihsel kural testi ve kaynak sınırı senaryolarını uygulama sonrası doğrula.
+Henüz simülatör/şema/test yok; kabul verilmedi.

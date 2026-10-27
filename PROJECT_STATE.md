@@ -52,3 +52,11 @@ PYTHONPATH=src ./scripts/bootstrap.sh
 ```
 
 Not yet validated: Docker build/compose runtime, live Binance network snapshot, VPS resource limits, long-running collector, live/replay parity, full paper ledger, full EOD PnL/model evaluation.
+
+## Time Machine — 2026-10-27
+
+- Kullanıcı kabulü: replay'den ayrı `timemachine` araştırma feature'ı.
+- Kaynak incelemesi ve BTC uyarlama sözleşmesi: references/16-timemachine.md.
+- Karar: decision_log/2026-10-27-timemachine.md.
+- Durum: specification accepted; implementation, schemas, config wiring and tests pending.
+- Çalışan runtime, replay ve test sayısı değiştirilmedi. VPS kontrolü/smoke hâlâ sıradaki iş.
