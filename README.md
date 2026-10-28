@@ -38,6 +38,8 @@ and starting a continuous collector are separate steps.
 
 Full options: [INSTALLATION.md](INSTALLATION.md).
 Manual setup, diagnostics and test commands: [docs/COMMANDS.md](docs/COMMANDS.md).
+Restricted gateway status/validate/deploy procedure: [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
+Fail-closed diagnostics and Git metadata repair: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 Deployment entry point: [VPS_DEPLOYMENT.md](VPS_DEPLOYMENT.md).
 
 ## Commands and installation records
@@ -47,6 +49,8 @@ Deployment entry point: [VPS_DEPLOYMENT.md](VPS_DEPLOYMENT.md).
 | New/existing server installation, options and failure behavior | [INSTALLATION.md](INSTALLATION.md) |
 | Docker/host diagnostics, config, builds, tests, API, snapshot and stream | [docs/COMMANDS.md](docs/COMMANDS.md) |
 | Resource, recovery, one-hour soak and raw-session audit commands | [docs/COMMANDS.md](docs/COMMANDS.md) |
+| Restricted SSH operations, gates, evidence and limitations | [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) |
+| Fail-closed troubleshooting and development Git metadata permissions | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 | Current technical status and remaining acceptance work | [PROJECT_STATE.md](PROJECT_STATE.md) |
 
 Each installer run writes `deploy.log`, commit/config hashes and, on success,

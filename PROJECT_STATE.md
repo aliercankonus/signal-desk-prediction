@@ -58,11 +58,12 @@ unsupported. Do not bypass the installed gateway's approved-release identity.
 
 - PR #6 merged at 2d10f033faf7ecbf9064a957f2bacc91a979c1a8. Its CI passed all
   103 tests inside the collector image.
-- User reports protected release approval, gateway activation and successful
-  authenticated status, validate and deploy through the agent. Host validation
-  passed 103 tests; deployment passed 103 tests, snapshot and 25-event stream
-  with gap_count=0. API was healthy on loopback, paper-only, execution disabled,
-  ready_for_enter=false, collector idle. Exact manifest/image IDs were not supplied.
+- Authenticated gateway `status`, `validate` and `deploy` were observed via SSH
+  on the target host. Host validation passed 103 tests; deployment passed 103
+  tests, snapshot and a 25-event stream with gap_count=0. The API was healthy
+  on loopback, paper-only, execution disabled, ready_for_enter=false, collector
+  idle. Host-local manifest/log paths were printed; their contents and exact
+  image IDs were not independently read.
 - Current candidate adds session application sequence, application-clock features,
   capture-time feature hashes and bounded split-stream replay. No VPS rollout yet.
 - New capture processing and metadata overhead require new resource measurements.
@@ -72,6 +73,8 @@ unsupported. Do not bypass the installed gateway's approved-release identity.
 
 ## Records and ownership
 - INSTALLATION.md: canonical repeatable install procedure.
+- docs/OPERATIONS_RUNBOOK.md: restricted gateway operation gates and private evidence.
+- docs/TROUBLESHOOTING.md: fail-closed diagnosis, including development Git metadata ownership.
 - docs/COMMANDS.md: all generic manual setup, diagnosis and acceptance commands.
 - decision_log: source research and rationale.
 - runtime/install: private per-install command/output/image/config evidence, ignored
