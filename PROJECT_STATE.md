@@ -44,6 +44,16 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 - The operator reports no API deployment or gateway promotion. The active
   gateway release remains `2d10f033faf7ecbf9064a957f2bacc91a979c1a8`,
   distinct from the tested candidate. This is not a direct host read-back.
+- For the later recovery of existing session
+  `cb8a0767d7284b8aaa3d09fbca7095f2`, the operator provided
+  `RECOVERY_DIAGNOSTICS_OK`: 258,175 session records (one snapshot, 35,936
+  depth deltas and 222,238 trades), with four raw files checked. Two replays
+  matched, each reporting 258,114 ready features and the same feature SHA-256
+  `bafabf00f920c948a7f952425d105197039af0104c0b28b65904afdbe94bf6c0`.
+  This is operator-provided output, not an independent inspection of the
+  host's raw data, approval record or private logs. Resource sampling was
+  incomplete; **soak_acceptance=false**. Diagnostic parity does not establish
+  a completed resource-qualified soak or permission to promote a release.
 - Independent clean-host installation and restore remain pending.
 
 ## Completed vs pending

@@ -17,9 +17,11 @@ host ownership, sshd policy or the protected release manifest.
 | 2026-10-28 | Development Git metadata repair | A fetch first failed because `.git/FETCH_HEAD` was `root:root` (`0:0`), mode `0644`. The operator reported correcting ownership. Later `stat` directly showed UID/GID **10000:10000**, mode `0644`, matching the development account, and `git fetch origin` succeeded. | The exact repair command was not witnessed. These numeric IDs are evidence for this checkout only, not an installation default; no protected release ownership was changed by the agent. |
 | 2026-10-28 | Dirty-checkout preservation and private backup | Direct local checks: the original branch/worktree stayed dirty with its active config intact; a separate documentation worktree was created from main. A private restrictive backup copied and byte-compared all **10** inventoried changed/untracked files, stored a binary Git diff/status/HEAD/branch, and verified a **14-entry** SHA-256 manifest. | The backup is not a verified restore test; its private location and contents are intentionally absent here. |
 | 2026-10-28 | Bounded candidate acceptance | **Operator-provided output**, not an agent-run command: `ACCEPTANCE_OK`, `RAW_INVENTORY_OK`, `RAW_VERIFY_PREFIX_OK`, `RAW_CHECK_CAPTURE_OK`, `RAW_CHECK_REPLAYS_OK`. The operator reported no API deployment or gateway promotion. | The supplied private evidence location was not accessed. No exact counts, test totals, feature hashes, resource measurements or host read-back were independently inspected. |
+| 2026-10-28 | Existing-session recovery diagnostics | **Operator-provided output**, not an agent-run command: session `cb8a0767d7284b8aaa3d09fbca7095f2`, `RECOVERY_DIAGNOSTICS_OK`; 258,175 records (snapshot=1, depth=35,936, trades=222,238); four raw files checked; two matching replays, `ready_features=[258114,258114]`, `feature_sha256=bafabf00f920c948a7f952425d105197039af0104c0b28b65904afdbe94bf6c0`. | The agent did not access the VPS data or private raw logs, verify the reported counts/hashes independently, or run diagnostics. Resource sampling was incomplete; `soak_acceptance=false`. This is diagnostic parity, not full soak/resource acceptance or promotion. |
 
-The reported run tested candidate `91cd925d90bcc0f07d57b064dd180bc945c4602c`
-using the procedure merged through PR #9 at
+The bounded candidate acceptance reported above tested candidate
+`91cd925d90bcc0f07d57b064dd180bc945c4602c` using the procedure merged
+through PR #9 at
 `d5bba53fc6709af43b3821691a273e9a4622a119`. The operator says the active
 gateway release remains `2d10f033faf7ecbf9064a957f2bacc91a979c1a8`;
 the candidate was **not** promoted. The reported gate scope covers a bounded

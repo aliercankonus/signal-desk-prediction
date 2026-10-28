@@ -28,6 +28,71 @@ parity for this research-only overlay.
 
 ## Input manifest and bounded local invocation
 
+### Completed raw COPY → bounded prefix (offline only)
+
+`python -m signal_desk.research.extract_prefix` operates on a stopped, completed,
+read-only **copy** of the ordered raw directory, not a live collector or VPS volume.
+Its CLI is pinned to collector session
+`cb8a0767d7284b8aaa3d09fbca7095f2`, whose independently recorded complete
+counts must be exactly one snapshot, 35,936 depth deltas and 222,238 trades
+(258,175 events). It does not relax the baseline runner's limits. An explicit
+Python-only `synthetic_session_id` override exists for synthetic tests; no CLI
+override exists for a real source.
+
+Supply a private `completed-raw-copy-v1` source manifest containing
+`{"manifest_version":"completed-raw-copy-v1", "session_id":"cb8a0767d7284b8aaa3d09fbca7095f2", "completed":true, "expected_counts":{"book_snapshot":1,"book_delta":35936,"trade":222238}, "expected_feature_sha256":"bafabf00f920c948a7f952425d105197039af0104c0b28b65904afdbe94bf6c0", "files":[{"name":"<actual basename>","bytes":<actual size>,"sha256":"<actual 64-character lowercase SHA-256>"}]}`.
+The `files` list must include **every** recognized source JSONL file, including
+files with other sessions, with independently obtained exact sizes and SHA-256
+values. No source file hashes are invented here; verify and record them privately
+from the completed copy before invoking extraction. The completion assertion and
+counts must come from the independent collector summary, not inferred from the
+extracted prefix. The source manifest itself is not authentication of the exchange.
+
+```bash
+PYTHONPATH=src python -m signal_desk.research.extract_prefix \
+  --raw-dir /path/to/completed/read-only/raw-copy \
+  --source-manifest /path/to/private/completed-raw-copy-v1.json \
+  --spec docs/research/s1_experiment_v1.json \
+  --output-dir /path/to/new/private/prefix-directory
+```
+
+The output directory must not exist and must be outside the source tree. The
+raw COPY directory and every recognized raw file must have all write-permission
+bits cleared before extraction; this rejects ordinarily writable inputs but does
+not prove that collection stopped, that an operator's completion assertion is
+true, or that a privileged writer cannot change the copy. Establish completion
+and read-only isolation independently; the manifest and mode checks are not
+host attestation. The extractor checks the reviewed canonical specification and
+its **exact file-byte**
+SHA-256; scans the whole source by shared application sequence with the existing
+bounded `SessionInput` reader and `CausalFeaturePipeline`, verifies every source
+capture feature hash, the ordered full-session feature-output digest reported by
+the operator, independently recorded source counts, and all source file
+hashes. The pinned aggregate digest is an expected value, not direct evidence
+that the private copy has been inspected in this PR. It copies the original
+JSONL record bytes into their original stream/day filenames without
+resequencing, splitting lines, or changing feature digests.
+The prefix starts at sequence 1 and stops *before* the next record would exceed
+either 90,000 records or 128 MiB of serialized raw JSONL. It must contain the
+starting snapshot and depth bridge. Separate source ceilings are 64 files,
+512 MiB of predeclared raw input, 350,000 selected source records, 4 MiB per
+record, and a cooperative 900-second runtime budget. The source must be stopped;
+metadata and identity checks detect ordinary changes, not adversarial races.
+
+On complete verification it writes `extraction-v1.json` (source identity,
+per-file hashes, full and selected counts, sequence/timestamp range, selection
+policy, output hashes, truncation scope and duration status) and publishes
+`research-input-v1.json` **last**. A failure leaves an incomplete directory for
+inspection without a valid input manifest; do not treat it as success or rerun
+over it. `source_end` means all source events fit; `record_limit`/`byte_limit`
+explicitly mark a truncated prefix. Duration below the proposed 60 days is
+`insufficient_for_proposed_60_day_split`; even a longer duration would not
+approve fixed chronological windows. This is diagnostic prefix consistency, not
+a full-session 60-day experiment, exchange completeness, model selection or PnL.
+Use the emitted input manifest and output directory as `--input-manifest` and
+`--raw-dir` respectively for the baseline invocation below; its independent
+100,000-row limit still applies.
+
 Run **offline** on a completed, read-only copy of one supported ordered session,
 not on a running collector or VPS production volume. Supply one versioned
 `research-input-v1` JSON manifest. Its `session_id` is a 32-character lowercase
