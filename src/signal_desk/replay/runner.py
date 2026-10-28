@@ -8,14 +8,14 @@ from signal_desk.collector.order_book_state import L2BookState, OrderBookGap
 from signal_desk.config.loader import validate_config
 from signal_desk.features.engine import FeatureState
 from signal_desk.schemas.validate import validate_json
-from signal_desk.storage.jsonl import append_jsonl, read_jsonl
+from signal_desk.storage.jsonl import append_jsonl, iter_jsonl
 
 
 def replay_events(input_path: str | Path, output_path: str | Path, *, symbol: str = "BTCUSDT") -> dict:
     book = L2BookState()
     features = FeatureState(symbol=symbol)
     stats = {"events_read": 0, "features_written": 0, "gaps": 0, "last_state": "EMPTY"}
-    for event in read_jsonl(input_path):
+    for event in iter_jsonl(input_path):
         stats["events_read"] += 1
         top = None
         try:

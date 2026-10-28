@@ -1,6 +1,6 @@
 # Project State
 
-Updated: 2026-10-27. This is the public technical checkpoint, with no host-specific
+Updated: 2026-10-28. This is the public technical checkpoint, with no host-specific
 names, paths, container identities, credentials or full operational transcripts.
 Repository: https://github.com/aliercankonus/signal-desk-prediction
 
@@ -41,7 +41,7 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 | Session-aware raw consistency audit | Implemented and target-host evidence |
 | One-command installer and full generic command catalog | Implemented; existing-VPS DEPLOY_OK reported; independent clean host pending |
 | Collector retention/compression | Quota/HALT guards only; automatic TTL/archive pending |
-| Live/replay parity and bounded combined replay | Pending; old replay reads full JSONL lists |
+| Ordered capture and bounded combined replay | Candidate implemented; target-host parity/resource acceptance pending |
 | Backup/restore and second-host data migration | Pending; old scripts remain skeleton |
 | Full paper ledger, EOD PnL and model economics | Pending |
 | Time Machine | Specification only |
@@ -49,15 +49,26 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 
 ## Next task
 
-A hostname-only authenticated SSH check succeeded from the agent container; it
-does not authorize deployment. PR #6 prepares a protected-release gateway design:
-the VPS root operator must separately clone a reviewed full commit SHA outside
-Hermes mounts, approve root-only config and manifest, then activate SSH. No host
-setup, validation or deployment has been performed by this PR. The writable
-development checkout is not the privileged deployment checkout and is not
-re-owned. Independent clean-host installation and restore remain pending; build
-bounded combined depth/trade replay before claiming live/replay parity. The
-collector remains idle by default; live execution stays disabled.
+Review the ordered capture/replay candidate, complete collector-image CI, then
+explicitly approve a new protected host release before a fresh bounded capture and
+replay test. Older audited raw sessions have no application sequence and return
+unsupported. Do not bypass the installed gateway's approved-release identity.
+
+## 2026-10-28 operational evidence and candidate
+
+- PR #6 merged at 2d10f033faf7ecbf9064a957f2bacc91a979c1a8. Its CI passed all
+  103 tests inside the collector image.
+- User reports protected release approval, gateway activation and successful
+  authenticated status, validate and deploy through the agent. Host validation
+  passed 103 tests; deployment passed 103 tests, snapshot and 25-event stream
+  with gap_count=0. API was healthy on loopback, paper-only, execution disabled,
+  ready_for_enter=false, collector idle. Exact manifest/image IDs were not supplied.
+- Current candidate adds session application sequence, application-clock features,
+  capture-time feature hashes and bounded split-stream replay. No VPS rollout yet.
+- New capture processing and metadata overhead require new resource measurements.
+  Earlier one-hour collector measurements are not evidence for this candidate.
+- Clean-host restore, 24h collection, model economics, full ledger/PnL and
+  Time Machine implementation remain pending.
 
 ## Records and ownership
 - INSTALLATION.md: canonical repeatable install procedure.

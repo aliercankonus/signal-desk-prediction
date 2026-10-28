@@ -6,6 +6,7 @@ import json
 import time
 import sys
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,8 @@ from signal_desk.collector.binance_mapping import map_depth_delta, map_snapshot,
 from signal_desk.collector.order_book_state import L2BookState, OrderBookGap
 from signal_desk.storage.jsonl import append_jsonl
 from signal_desk.schemas.validate import validate_json
+from signal_desk.features.causal import (CausalFeaturePipeline, ORDERING_VERSION,
+                                       FEATURE_VERSION, feature_policy, feature_digest)
 
 
 def fetch_depth_snapshot(rest_base_url: str, symbol: str, limit: int) -> dict:
@@ -59,15 +62,29 @@ class CollectorStorageError(RuntimeError):
 def write_event(config: dict, event: dict) -> None:
     started = time.perf_counter()
     validate_json(event, "market_event.schema.json")
+    runtime = config.get("_collector_runtime")
+    if event["event_type"] == "book_snapshot":
+        session_id = runtime["session_id"] if runtime is not None else uuid.uuid4().hex
+        market = config.get("exchange", {}).get("market_data", {})
+        policy = feature_policy(stale_l2_ms=market.get("stale_l2_ms", 2000),
+                                stale_trades_ms=market.get("stale_trades_ms", 3000))
+        config["_capture_features"] = CausalFeaturePipeline(session_id, policy)
+    pipeline = config.get("_capture_features")
+    if pipeline is None:
+        raise ValueError("Capture must begin with a snapshot")
+    event = {**event, "data_quality": {**event.get("data_quality", {}),
+             "collector_session_id": pipeline.session_id,
+             "ordering_version": ORDERING_VERSION,
+             "ingest_sequence": pipeline.sequence + 1,
+             "applied_monotonic_ns": time.monotonic_ns(), "applied_ts": utc_now_iso(),
+             "feature_policy": pipeline.policy, "feature_version": FEATURE_VERSION}}
+    snapshot = pipeline.apply(event, validated=True)
+    event["data_quality"]["feature_sha256"] = feature_digest(snapshot)
     metrics = config.get("_pipeline_metrics")
     validation_ms = (time.perf_counter() - started) * 1000
     if metrics is not None:
         metrics["max_validation_ms"] = max(metrics["max_validation_ms"], validation_ms)
     suffix = "depth" if event["event_type"] in {"book_snapshot", "book_delta"} else "trade"
-    runtime = config.get("_collector_runtime")
-    if runtime is not None:
-        event = {**event, "data_quality": {**event.get("data_quality", {}),
-                                         "collector_session_id": runtime["session_id"]}}
     size = len((json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
     guard = config.get("_storage_guard")
     io_started = time.perf_counter()
@@ -97,7 +114,8 @@ def run_once(config_path: str) -> int:
     event = map_snapshot(snapshot, symbol=ex["symbol"], raw_stream="rest_depth_snapshot")
     write_event(config, event)
     write_status(config, "RUNNING", "snapshot_written", last_update_id=event["last_update_id"])
-    print(json.dumps({"status": "ok", "raw_path": str(raw_file(config, "depth")), "last_update_id": event["last_update_id"]}))
+    print(json.dumps({"status": "ok", "raw_path": str(raw_file(config, "depth")), "last_update_id": event["last_update_id"],
+                      "session_id": config["_capture_features"].session_id, "ordering_version": ORDERING_VERSION}))
     return 0
 
 
@@ -326,6 +344,10 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
             stats = dict(written_events=written, depth_events=depth_events,
                          trade_events=trade_events, stale_depth_events=stale_depth_events,
                          gap_count=0, last_update_id=book.last_update_id)
+            capture = config.get("_capture_features")
+            if capture is not None:
+                stats.update(session_id=capture.session_id, ordering_version=ORDERING_VERSION,
+                             last_ingest_sequence=capture.sequence)
             if synchronized and on_progress is not None:
                 on_progress(stats)
             if synchronized and (written % 100 == 0 or now() - last_status >= policy.status_interval_seconds):

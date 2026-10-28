@@ -109,3 +109,13 @@ Keep installation logs/manifests locally under runtime/install. Local mocked tes
 are not clean-host, restore or paper-ready acceptance. If automatic review requires
 explicit approval for a main merge, obtain it for the concrete PR; never bypass a
 rejection by updating main through a ref mutation.
+
+
+## Ordered capture and session replay
+
+Apply [the ordered replay contract](references/19-ordered-session-replay.md).
+Only new captures with shared ingest_sequence and capture-time feature hashes can
+establish exact stored feature parity. Never infer application order from venue or
+receipt timestamps in legacy files. Respect input/output/book/time caps and keep
+expected completion counts separate from prefix hash consistency. Do not promote
+a new release through the restricted SSH key.
