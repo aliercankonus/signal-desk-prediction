@@ -87,6 +87,19 @@ collector session selected by session_id. Check counts, schemas, sequence and fi
 hashes. The tool must not alter raw files. Do not substitute the old replay reader,
 which loads entire large files into lists. A passing audit is not live/replay parity.
 
+## Controlled host-command gateway
+
+For a containerized agent, follow [INSTALLATION.md](INSTALLATION.md): the VPS
+root operator must clone a reviewed full SHA to a separate protected checkout
+outside Hermes mounts, copy root-approved paper-only config there, and approve a
+root-only release manifest before installing the forced SSH command. Never re-own
+the writable development checkout. SSH permits only status, validate and deploy;
+it cannot fetch, select or promote code. Every operation checks the pinned SHA,
+root ownership, mount isolation and config hashes before repository code runs.
+The hostname-only authorization remains unchanged until the operator's separate
+activation step. Command filtering is not a sandbox for host-privileged code.
+Preserve the existing Compose project, data volume and disabled execution.
+
 ## Portable installation in one operation
 
 Follow [INSTALLATION.md](INSTALLATION.md) and the [command catalog](docs/COMMANDS.md).

@@ -41,6 +41,59 @@ AGENT_CONTAINER=your-agent-container
 docker inspect "$AGENT_CONTAINER" --format 'Network={{.HostConfig.NetworkMode}}{{println}}{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 ```
 
+## Restricted SSH host-command gateway
+
+The writable development checkout is **not** a deployment checkout. The VPS
+root operator follows [INSTALLATION.md](../INSTALLATION.md) to clone a reviewed
+full commit SHA into a separate root-owned `/srv/signal-desk-releases/<SHA>`
+checkout, outside Hermes mounts. Do not re-own the development checkout. The
+root-only approval step first independently checks SHA, owner/modes and Hermes
+mounts, installs a root-owned verifier copy, then copies the existing
+operator-approved `.env` and config (mode 0600) without printing contents. It
+pins their hashes, the existing Compose project, and the identity of the volume
+mounted by the running API, leaving hostname-only SSH unchanged. The
+later, separate one-shot root-terminal activation step installs root-owned scripts,
+checks each shell script separately with `bash -n`, validates sudoers and only
+then replaces the forced key. Neither step deploys the application.
+
+Prerequisites: VPS root terminal, trusted remote and full reviewed commit SHA,
+root-only config staging, existing project/volume, dedicated SSH account with
+one hostname-only restricted key, independently trusted public-key fingerprint,
+Git, Python 3, Docker/Compose, `sudo`, `visudo` and `ssh-keygen`. The root operator
+must inspect the Hermes container's mounts and other host access paths; the
+release guard refuses an overlap, writable/replaceable root paths, an altered
+commit, code or config, and an unavailable pinned container. Approval requires
+`mode: paper` and `execution_enabled: false`. Partial setup needs manual
+inspection; no rollback or host acceptance is claimed.
+
+Only **after** root activation, from the agent container with locally configured
+host, user, dedicated key and pinned known-hosts path (never in Git):
+
+```bash
+SSH_HOST=your-reachable-host-or-gateway
+SSH_USER=your-dedicated-ssh-user
+SSH_KEY=/path/to/dedicated-private-key
+SSH_KNOWN_HOSTS=/path/to/pinned-known-hosts
+ssh -T -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+  "$SSH_USER@$SSH_HOST" status
+ssh -T -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+  "$SSH_USER@$SSH_HOST" validate
+ssh -T -i "$SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+  "$SSH_USER@$SSH_HOST" deploy
+```
+
+`status` reports the pinned project's state. `validate` checks Compose, builds
+and tests the collector. `deploy` invokes guarded paper-only deployment for the
+same project and volume. Each request is exactly one operation without flags;
+SSH cannot fetch, update or promote a release. The installed verifier checks
+protected paths, approved full SHA and config hashes on **every** operation.
+Docker-backed operations execute repository code with host/root privileges;
+command filtering is not a security sandbox. Local tests do not prove VPS
+sshd/sudoers, Docker behavior or clean-host restore.
+
 ## Repository and existing settings
 
 ```bash

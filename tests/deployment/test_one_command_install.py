@@ -17,7 +17,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def sandbox(tmp_path):
     repo = tmp_path / "project with spaces"
     shutil.copytree(ROOT, repo, ignore=shutil.ignore_patterns(
-        "__pycache__", ".pytest_cache", ".git", ".env", "runtime"))
+        "__pycache__", ".pytest_cache", ".git", ".env", "runtime", "config.yaml"))
+    # The collector image deliberately excludes the active config. Use a
+    # disposable example so the preservation test is independent of host state.
+    shutil.copyfile(repo / "config/config.example.yaml", repo / "config/config.yaml")
     (repo / ".git").mkdir()
     binaries = tmp_path / "bin"
     binaries.mkdir()
