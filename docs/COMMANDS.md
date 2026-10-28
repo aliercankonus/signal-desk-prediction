@@ -260,3 +260,26 @@ Data deletion, prune, down -v and remove-orphans are not normal installation ste
 - Installer additions have local fake-Docker orchestration tests; 88 local tests passed.
 - The existing-VPS installer run returned DEPLOY_OK with paper-only API health.
   Independent clean-server installation remains pending.
+
+
+## Ordered session replay (new captures only)
+
+See [the replay contract](../references/19-ordered-session-replay.md). Run only in an
+operator-reviewed release/development image after collection stops. The installed
+SSH gateway does not yet expose a replay operation or select this candidate.
+Replace placeholders with a new capture's session ID and recorded counts:
+
+```bash
+docker compose -p "$PROJECT" run --rm --no-deps collector \
+  python -u -m signal_desk.replay.session \
+  --raw-dir /data/raw --session-id "$SESSION_ID" \
+  --expected-snapshots "$SNAPSHOTS" --expected-depth "$DEPTH_COUNT" \
+  --expected-trades "$TRADE_COUNT"
+echo "REPLAY_EXIT_CODE=$?"
+```
+
+Require status=ok, expected_counts_checked=true and capture_hashes_verified equal
+to all expected records. Repeat the replay and compare feature_sha256. Legacy
+sessions without application ordering return unsupported; do not rewrite or sort
+the old raw files to force a match. Optional feature output requires a unique path
+and an existing parent outside /data/raw; existing files are never overwritten.

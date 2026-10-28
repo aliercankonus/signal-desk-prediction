@@ -64,10 +64,19 @@ for host paths, hostnames and session IDs.
 - Installer orchestration has local fake-Docker test coverage. The user-reported
   existing-VPS run returned `DEPLOY_OK`, with paper-only API health and local logs.
   Independent clean-host installation remains unverified.
-- A 24h soak, p99 latency, bounded merged replay parity, data restore, full ledger/PnL
+- A 24h soak, p99 latency, target-host ordered replay parity, data restore, full ledger/PnL
   and economic model acceptance remain incomplete. Time Machine is specification-only.
 
 The installer keeps command logs and version/hash manifests locally. Host-specific
 identities and private paths are not published in source. `PROJECT_STATE.md` is the
 technical checkpoint; `decision_log` records rationale; `runtime/install` stores
 local installation evidence.
+
+
+## Ordered capture/replay candidate
+
+New capture code records application order and feature hashes. The bounded
+[session replay tool](references/19-ordered-session-replay.md) merges depth/trades
+by that order and checks every captured hash. Historical sessions lack this
+metadata and cannot establish exact parity. Target-host acceptance is pending;
+the currently approved VPS release is not updated by this source change.

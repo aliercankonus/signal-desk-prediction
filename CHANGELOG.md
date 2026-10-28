@@ -95,3 +95,15 @@
   independently of the user's conversation language.
 - Record the approved installer/audit merge and user-reported existing-VPS DEPLOY_OK.
 - Independent clean-host installation, restore and full paper-readiness gates remain pending.
+
+
+## 2026-10-28 — Ordered capture and bounded session replay candidate
+
+- Stamp per-session application order/cutoffs and capture-time feature hashes.
+- Share a bounded causal feature transition between capture and replay; snapshots
+  alone do not imply synchronized/fresh features.
+- Merge split depth/trade day files with two bounded lookaheads; check hashes,
+  sequence, immutable inputs, explicit completion counts and resource caps.
+- Publish optional output atomically without overwrite; leave raw files untouched.
+- Reject legacy ordering as unsupported; keep old single-file input streaming.
+- No host release promotion, model, order execution or Time Machine implementation.
