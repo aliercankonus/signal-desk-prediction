@@ -105,7 +105,7 @@ def test_non_root_owned_release_is_rejected(release):
     if os.getuid() == 0:
         # The collector image runs as root: make only the fixture checkout
         # unapproved, without weakening the verifier's root-only policy.
-        repo.chown(12345, -1)
+        os.chown(repo, 12345, -1)
     with pytest.raises(g.ReleaseError, match="Unapproved owner"):
         g.verify_release(manifest, owner_uid=0, mount_sources=[], observed_volume_identity=manifest["volume_identity"])
 
