@@ -32,6 +32,18 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
   status=ok, mode=paper, execution_enabled=false, config=cfg-v16-example-001,
   collector=idle, smoke=1; local manifest and command log paths were reported.
 - The assistant did not independently inspect that manifest or its exact image IDs.
+- Ordered capture/replay acceptance for candidate
+  `91cd925d90bcc0f07d57b064dd180bc945c4602c` was reported by the VPS
+  operator on 2026-10-28, using the procedure merged in PR #9 at
+  `d5bba53fc6709af43b3821691a273e9a4622a119`. The operator supplied
+  `ACCEPTANCE_OK`, `RAW_INVENTORY_OK`, `RAW_VERIFY_PREFIX_OK`,
+  `RAW_CHECK_CAPTURE_OK` and `RAW_CHECK_REPLAYS_OK`. This reports a bounded
+  capture, preservation of historical raw-file prefixes, raw audit and two
+  matching replays; the assistant did not access the private evidence or
+  independently inspect counts, hashes or resource measurements.
+- The operator reports no API deployment or gateway promotion. The active
+  gateway release remains `2d10f033faf7ecbf9064a957f2bacc91a979c1a8`,
+  distinct from the tested candidate. This is not a direct host read-back.
 - Independent clean-host installation and restore remain pending.
 
 ## Completed vs pending
@@ -41,7 +53,7 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 | Session-aware raw consistency audit | Implemented and target-host evidence |
 | One-command installer and full generic command catalog | Implemented; existing-VPS DEPLOY_OK reported; independent clean host pending |
 | Collector retention/compression | Quota/HALT guards only; automatic TTL/archive pending |
-| Ordered capture and bounded combined replay | Candidate implemented; target-host parity/resource acceptance pending |
+| Ordered capture and bounded combined replay | Candidate implemented; operator-reported bounded VPS acceptance, private evidence uninspected; longer soak pending |
 | Backup/restore and second-host data migration | Pending; old scripts remain skeleton |
 | Full paper ledger, EOD PnL and model economics | Pending |
 | Time Machine | Specification only |
@@ -49,10 +61,25 @@ Repository: https://github.com/aliercankonus/signal-desk-prediction
 
 ## Next task
 
-Review the ordered capture/replay candidate, complete collector-image CI, then
-explicitly approve a new protected host release before a fresh bounded capture and
-replay test. Older audited raw sessions have no application sequence and return
-unsupported. Do not bypass the installed gateway's approved-release identity.
+After separate operator review, propose **one** candidate-only 60-minute soak,
+not an active-gateway deployment: confirm the existing API/release/volume and
+paper-only settings, require no other collector, then start a uniquely named
+collector with `--max-run-seconds 3600`, `--restart no`,
+`--memory 512m --cpus 0.75 --pids-limit 64`, and a 3,900-second outer wall
+budget. Stop only that candidate container on timeout or failure; do not retry
+or switch the gateway automatically. Acceptance would require an exited/0,
+non-OOM duration stop, positive depth and trade counts, zero gaps and zero
+reconnects, preservation of every pre-existing raw-file prefix (appends/new
+files allowed), a clean session-scoped raw audit, two matching bounded replays
+with verified capture hashes and positive `ready_features`, and unchanged
+active API/image/settings and volume identity. Retain root-only start/end
+UTC times, container/image/limit/exit metadata, periodic Docker stats, status
+and logs, exact counts/session ID, pre/post raw inventory and hashes, audit and
+both replay results, and disk/memory snapshots. Sampled stats are not peak or
+latency-percentile measurements. **This is a proposal, not an executed test.**
+Longer collection (including 24 hours), retention/restore, latency percentiles
+and model performance remain unverified; any release promotion needs separate
+authorization.
 
 ## 2026-10-28 operational evidence and candidate
 
@@ -64,12 +91,15 @@ unsupported. Do not bypass the installed gateway's approved-release identity.
   on loopback, paper-only, execution disabled, ready_for_enter=false, collector
   idle. Host-local manifest/log paths were printed; their contents and exact
   image IDs were not independently read.
-- Current candidate adds session application sequence, application-clock features,
-  capture-time feature hashes and bounded split-stream replay. No VPS rollout yet.
-- New capture processing and metadata overhead require new resource measurements.
-  Earlier one-hour collector measurements are not evidence for this candidate.
-- Clean-host restore, 24h collection, model economics, full ledger/PnL and
-  Time Machine implementation remain pending.
+- Candidate `91cd925d90bcc0f07d57b064dd180bc945c4602c` adds session
+  application sequence, application-clock features, capture-time feature hashes
+  and bounded split-stream replay. The operator reports a bounded VPS
+  acceptance run, **not** API rollout or gateway promotion of this candidate.
+- New capture processing and metadata overhead still need longer-duration
+  resource measurements. Earlier one-hour collector measurements are not
+  evidence for this candidate.
+- Clean-host restore, longer collection, retention, latency percentiles,
+  model economics, full ledger/PnL and Time Machine implementation remain pending.
 
 ## Records and ownership
 - INSTALLATION.md: canonical repeatable install procedure.
