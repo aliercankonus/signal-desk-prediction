@@ -74,6 +74,7 @@ unsupported. Do not bypass the installed gateway's approved-release identity.
 ## Records and ownership
 - INSTALLATION.md: canonical repeatable install procedure.
 - docs/OPERATIONS_RUNBOOK.md: restricted gateway operation gates and private evidence.
+- docs/OPERATIONS_LEDGER.md: dated public evidence, labelled by provenance and limits.
 - docs/TROUBLESHOOTING.md: fail-closed diagnosis, including development Git metadata ownership.
 - docs/COMMANDS.md: all generic manual setup, diagnosis and acceptance commands.
 - decision_log: source research and rationale.

@@ -45,7 +45,9 @@ docker inspect "$AGENT_CONTAINER" --format 'Network={{.HostConfig.NetworkMode}}{
 
 For the ordered, separately authorized `status` → `validate` → `deploy`
 procedure and exact exit-code/evidence capture, use
-[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md). For fail-closed diagnosis,
+[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md). The
+[dated operations ledger](OPERATIONS_LEDGER.md) distinguishes reports from
+observed output. For fail-closed diagnosis,
 including mixed Git metadata ownership in the writable development checkout,
 use [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Do not run this generic command
 catalog as a deployment script.

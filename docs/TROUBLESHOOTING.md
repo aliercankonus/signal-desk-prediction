@@ -13,6 +13,12 @@ A writable worktree does not prove its Git metadata is writable. A previous
 fetch in the development checkout failed because `.git/FETCH_HEAD` was owned by
 `root:root` with mode `0644`, while the checkout was used by a non-root account.
 The fetch stopped; local modifications and untracked files were not changed.
+The account running Git was independently observed as UID/GID **10000:10000**.
+Before the repair, `FETCH_HEAD` was **0:0**, mode **0644**; after an
+**operator-reported** ownership correction, a read-only `stat` independently
+showed **10000:10000**, mode **0644**, and `git fetch origin` succeeded.
+The exact host-side repair command was **not** observed. These numeric IDs are
+an incident record, **not portable values** to reuse on another checkout.
 
 1. In the affected **development** checkout, record branch, status and ownership
    without changing anything:
@@ -30,8 +36,12 @@ The fetch stopped; local modifications and untracked files were not changed.
    operator can use a targeted command such as:
 
    ```bash
-   # VPS/root terminal only; substitute the verified development account/group.
-   chown DEV_USER:DEV_GROUP /path/to/development-checkout/.git/FETCH_HEAD
+   # Authorized root terminal only; obtain IDs from the intended development
+   # account on THIS host, not from the historical 10000:10000 example.
+   DEV_UID=verified-numeric-uid
+   DEV_GID=verified-numeric-gid
+   stat -c '%u:%g %a %n' /path/to/development-checkout/.git/FETCH_HEAD
+   chown "$DEV_UID:$DEV_GID" /path/to/development-checkout/.git/FETCH_HEAD
    ```
 
    If other `.git` paths have mixed ownership, inventory them and review each

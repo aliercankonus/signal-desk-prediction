@@ -236,9 +236,10 @@ repository code. SSH has no fetch, checkout, release selection or promotion
 operation. `validate` builds and tests the collector; `deploy` runs the existing
 bounded paper-only deploy script against the **same** Compose project/volume.
 The exact operational sequence and evidence to record are in
-[docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md); failure diagnosis and
-Git metadata permission repair are in
-[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). This documented procedure
+[docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md); the sanitized dated
+[operations ledger](docs/OPERATIONS_LEDGER.md) distinguishes direct evidence
+from operator reports. Failure diagnosis and Git metadata permission repair are
+in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). This documented procedure
 alone is not evidence that a new protected release has been approved on a host.
 
 **Security boundary:** Docker-backed validation/deployment executes the approved
