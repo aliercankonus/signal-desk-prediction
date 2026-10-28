@@ -1,0 +1,57 @@
+{
+  "experiment_version": "s1-btcusdt-spot-v1",
+  "review_status": "proposed_not_executed",
+  "symbol": "BTCUSDT",
+  "venue": "Binance spot",
+  "position_scope": "long_or_flat_research_only",
+  "prediction_cadence_seconds": 30,
+  "prediction_clock": "UTC 30-second grid; select the last applied event at or before each grid instant, never exchange timestamp",
+  "horizons_seconds": [60, 300],
+  "warmup_seconds": 60,
+  "rolling_trade_window_seconds": 30,
+  "minimum_rolling_trades": 2,
+  "momentum_lookback_seconds": 60,
+  "quality": {
+    "ordering_version": "session-applied-v1",
+    "feature_version": "features-v17-applied-l2-trade",
+    "depth_max_age_ms": 2000,
+    "trade_max_age_ms": 3000,
+    "max_spread_bps": 20,
+    "require_bridged_book": true,
+    "reject_gaps_and_reconnects": true,
+    "reset_warmup_on_new_session": true
+  },
+  "label": {
+    "kind": "midpoint_direction_not_fill_or_return_forecast",
+    "due_at": "prediction_at + horizon_seconds in UTC",
+    "quote": "last causally applied quote at or before due_at; require valid two-sided midpoint, bridged book, depth <= 2000ms, trades <= 3000ms and spread <= 20bps at due_at; a later invalid quote cannot be replaced by an earlier quote; no quote after due_at",
+    "ties": "0; upward +1; downward -1",
+    "pending": "session ends before due_at",
+    "invalid": "due_at reached without a sufficiently fresh synchronized quality-gated quote; never backfill"
+  },
+  "candidates": ["no_change_v1", "momentum_60s_v1", "microprice_v1", "s1_flow_30s_v1"],
+  "s1_score": "0.7 * signed_aggressor_qty_ratio_30s + 0.3 * (microprice-midpoint)/spread; unitless raw score, not a probability or expected return",
+  "causal_inputs": ["applied_ts", "ingest_sequence", "capture_feature_sha256", "best_bid", "best_ask", "best_bid_qty", "best_ask_qty", "midpoint", "trade_side", "trade_qty", "trade freshness", "depth freshness"],
+  "chronological_split": {
+    "proposed_window_days": 60,
+    "train_days": 36,
+    "validation_days": 12,
+    "final_test_days": 12,
+    "purge_seconds_at_each_boundary": 300,
+    "embargo_seconds_after_each_boundary": 300,
+    "selection_only_on_validation": true,
+    "final_test_runs": 1,
+    "status": "requires reviewed fixed UTC start/end and adequate captured sessions; the diagnostic runner does not select models"
+  },
+  "trial_budget": {
+    "fixed_references": 3,
+    "s1_precommitted_variants": 1,
+    "parameter_searches": 0,
+    "future_parameter_search_requires_separate_review": true
+  },
+  "selection_metrics": ["common-timestamp coverage by horizon", "valid-label direction agreement", "class balance", "invalid/pending/no-output rates", "calibration only after a separately trained/calibrated model exists"],
+  "rejection_criteria": ["invalid ordering or failed capture hashes", "lookahead or horizon leakage", "unmatched candidate timestamps", "nonpositive valid coverage", "validation direction agreement no better than fixed references at common timestamps", "unreviewed cost, fill or risk assumptions", "final-test tuning or repeated final-test use"],
+  "limits": {"max_files": 64, "max_input_bytes": 268435456, "max_records": 200000, "max_output_rows": 100000, "max_window_events": 20000, "max_runtime_seconds": 600},
+  "economics": "prediction diagnostics only; no fees, paper fills, PnL, winner or profitability claims until a separately validated shared conservative paper-fill/risk/ledger core",
+  "time_machine": "separate_feature_not_used"
+}
