@@ -5,9 +5,12 @@ gateway.** The proposed root-terminal script is
 [`scripts/review/vps-acceptance-91cd925.sh`](../scripts/review/vps-acceptance-91cd925.sh).
 It pins commit `91cd925d90bcc0f07d57b064dd180bc945c4602c`. This PR does not
 approve, install, deploy or promote it. A manager and VPS root operator must
-review the script and separately authorize any host execution. Stage the exact
-reviewed bytes in a protected root-only location outside agent mounts; do not
-execute a script from a writable development checkout.
+review the script **and** [`scripts/review/acceptance_gates.py`](../scripts/review/acceptance_gates.py)
+helper and separately authorize any host execution. Stage both exact reviewed
+bytes together in a protected root-only directory outside agent mounts, verify
+them against this PR's commit, and do not execute from a writable development
+checkout. The helper runs on the VPS host from that staging directory; it is
+**not** expected to exist in the pinned `91cd925…` candidate checkout.
 
 ## Inputs supplied privately by the root operator
 
@@ -49,22 +52,50 @@ That command is **documentation**, not an authorization to run it. Do not rerun
 modify the active settings, remove old release files, or delete the data volume.
 The script creates a separate release checkout and approval record using the
 existing installed verifier; builds a uniquely tagged candidate image; checks
-Compose syntax, config/schemas and the entire pytest suite (**140 expected,
-not a reported result**); requires an idle collector before a single bounded
-1,000-event stream; records its fresh session ID and snapshot/depth/trade counts;
-audits and replays that stopped session twice; compares every captured feature
-hash and both `feature_sha256` results; hashes raw inputs before and after;
-records sampled container stats, limits, disk and memory snapshots; and verifies
-the old API/image, active settings/config and volume identity still match.
+Compose syntax, config/schemas and the pinned candidate's entire pytest suite
+(**140 expected in commit `91cd925…`, not a reported VPS result**). Separately,
+this review branch has 22 local acceptance-gate regressions; those tests are
+**not** part of the pinned candidate image. The procedure requires an idle
+collector before a single bounded 1,000-event stream. Before starting it, the
+script inventories **every existing raw file** in a private
+`raw-pre-capture.json` with byte size, SHA-256 and device/inode. After the
+capture exits, `raw-post-capture-prefix.json` requires every original file
+still to exist on its original inode, be no smaller, and retain the original byte prefix (SHA-256 over the original length);
+appends and new files are allowed. A missing, replaced, shortened or modified
+original fails closed. The captured session must be new and contain **positive
+depth and trade counts**, plus one snapshot and exactly 1,000 records.
 
-Every failure stops without promotion or retry. A failed live capture is stopped
-by exact container ID, but partial root-owned approval files and the stopped
-capture container are intentionally retained for inspection. A fast capture
-without a live resource sample fails acceptance rather than inventing a metric.
+The script then audits and replays the stopped session twice from a read-only
+data mount. Both replays must verify 1,000 capture hashes, match exact event
+counts and input-file hashes, have **positive `ready_features` separately in
+each run**, and produce identical `feature_sha256` values. A post-capture
+whole-file SHA-256 manifest for all `*.jsonl` inputs must remain unchanged
+through audit/replay (distinct from the append-permitting pre-capture check).
+Private evidence also contains capture stats/limits, disk and memory snapshots,
+and checks that the old API/image, active settings/config and volume identity
+still match.
+
+Every failure stops without promotion or retry. Candidate one-off containers
+have `--memory 512m --cpus 0.75 --pids-limit 64`, no network, and finite
+wall-clock budgets: validation 180 seconds, pytest 600 seconds, raw audit
+300 seconds, and **each** replay 600 seconds. `timeout` first sends INT and
+then kills its Docker CLI after another 20 seconds; on nonzero exit the script
+makes bounded attempts to stop/remove only the named candidate one-off
+container, then fails. If Docker is unresponsive, cleanup is **not guaranteed**;
+the root operator must inspect and resolve that container before any retry.
+The live capture separately has the same resource caps and a 600-second wait.
+On capture failure, cleanup attempts a bounded stop by exact container ID and
+post-failure prefix verification; an unresponsive daemon or incomplete check
+requires operator inspection. Partial root-owned approval files and the stopped
+capture container are intentionally retained for inspection. A fast capture without a live resource sample fails acceptance
+rather than inventing a metric.
 Sampled Docker stats are **not** peak/p99 evidence, and a bounded parity result
 is not 24-hour collection, restore, model or economic acceptance. No release
 promotion procedure is proposed here.
 
-Local review checks: `bash -n` on the script, compilation of its embedded
-Python blocks, a secret/literal scan, and a diff restricted to this script and
-document. No VPS acceptance command was executed for this PR.
+Local review checks: `bash -n` on the script, Python compilation,
+`PYTHONPATH=src python -m pytest -q` (162 locally passing, including 22 new
+review-branch tests), targeted `tests/deployment/test_acceptance_review.py` gates, a secret/deployment-literal
+scan, and a diff restricted to this script, helper, tests and document. These
+are local review checks only. **No VPS acceptance or deployment command was
+executed** for this PR.

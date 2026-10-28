@@ -4,6 +4,22 @@ set -Eeuo pipefail
 umask 077
 unset PYTHONPATH PYTHONHOME PYTHONOPTIMIZE
 [[ $(id -u) -eq 0 ]] || { echo 'Root terminal required' >&2; exit 1; }
+# The reviewed helper is staged beside this script, not in pinned candidate main.
+SCRIPT_PATH=$(realpath -e -- "${BASH_SOURCE[0]}")
+SCRIPT_DIR=${SCRIPT_PATH%/*}
+GATES=$SCRIPT_DIR/acceptance_gates.py
+python3 - "$SCRIPT_PATH" "$GATES" <<'PY'
+import pathlib, stat, sys
+for raw in sys.argv[1:]:
+    path = pathlib.Path(raw)
+    for item in (path, *path.parents):
+        info = item.lstat()
+        assert info.st_uid == 0 and not stat.S_ISLNK(info.st_mode) and not info.st_mode & 0o022, item
+        if item == path:
+            assert stat.S_ISREG(info.st_mode), item
+        else:
+            assert stat.S_ISDIR(info.st_mode), item
+PY
 # Host-specific inputs are supplied privately by the root operator; never store values in Git.
 required=(ACCEPT_REMOTE ACCEPT_GUARD ACCEPT_ACTIVE_SETTINGS ACCEPT_RELEASE_ROOT
   ACCEPT_CONFIG_ROOT ACCEPT_SETTINGS_ROOT ACCEPT_EVIDENCE_ROOT ACCEPT_EXPECTED_HOST
@@ -119,13 +135,31 @@ docker image inspect --format '{{.Id}}' "$IMAGE" > "$EVIDENCE/candidate-image-id
 CONFIG_MOUNT="type=bind,source=$RELEASE/config,target=/app/config,readonly"
 DATA_MOUNT="type=volume,source=$VOLUME,target=/data"
 DATA_READ_MOUNT="type=volume,source=$VOLUME,target=/data,readonly"
-docker run --rm --network none --env-file "$RELEASE/.env" --env SIGNAL_DESK_CONFIG=/app/config/config.yaml --env PYTHONOPTIMIZE=0 \
-  --mount "$CONFIG_MOUNT" "$IMAGE" python -m signal_desk.tools.validate_all --config config/config.yaml \
+# One-off candidate containers have hard resources and wall-clock budgets.
+run_bounded() {
+  local budget=$1 kind=$2 rc name
+  shift 2
+  name="${ACCEPT_CONTAINER_PREFIX:0:12}-${SHA:0:8}-${kind}-$$"
+  [[ -z $(docker ps -aq --filter "name=^/${name}$") ]] || return 1
+  if timeout --signal=INT --kill-after=20s "$budget" docker run --rm --name "$name" \
+    --stop-timeout 10 --network none --memory 512m --cpus 0.75 --pids-limit 64 \
+    --env-file "$RELEASE/.env" --env SIGNAL_DESK_CONFIG=/app/config/config.yaml \
+    --env PYTHONOPTIMIZE=0 --mount "$CONFIG_MOUNT" "$@"; then
+    return 0
+  else
+    rc=$?
+    # Scope bounded cleanup to this one candidate; an unresponsive daemon may
+    # leave it running and requires manual operator intervention.
+    timeout 20s docker stop --time 10 "$name" >/dev/null 2>&1 || true
+    timeout 20s docker rm -f "$name" >/dev/null 2>&1 || true
+    return "$rc"
+  fi
+}
+run_bounded 180s validate "$IMAGE" python -m signal_desk.tools.validate_all --config config/config.yaml \
   2>&1 | tee "$EVIDENCE/validate.log"
-docker run --rm --network none --env-file "$RELEASE/.env" --env SIGNAL_DESK_CONFIG=/app/config/config.yaml --env PYTHONOPTIMIZE=0 \
-  --mount "$CONFIG_MOUNT" "$IMAGE" python -m pytest -q 2>&1 | tee "$EVIDENCE/pytest.log"
+run_bounded 600s pytest "$IMAGE" python -m pytest -q 2>&1 | tee "$EVIDENCE/pytest.log"
 grep -Eq '(^|[[:space:]])140 passed([[:space:]]|,|$)' "$EVIDENCE/pytest.log" || {
-  echo 'Expected 140 passing tests; stop' >&2; exit 1;
+  echo 'Expected 140 passing tests in pinned candidate; stop' >&2; exit 1;
 }
 python3 "$GUARD" verify --settings "$SETTINGS" >/dev/null
 # Fail if ANY running Compose collector exists, or any non-API container uses this data volume.
@@ -154,14 +188,23 @@ p=pathlib.Path(sys.argv[1])
 print(json.loads(p.read_text()).get('session_id', '') if p.is_file() else '')
 PY
 )
+RAW_DIR=$VOLUME_MOUNT/raw
+# Inventory every existing raw file *before* starting the candidate capture.
+python3 "$GATES" inventory --raw-dir "$RAW_DIR" --output "$EVIDENCE/raw-pre-capture.json"
 CAPTURE_ID=''
 CAPTURE_COMPLETE=0
 cleanup_on_failure() {
   rc=$?
   if ((rc != 0 && CAPTURE_COMPLETE == 0)) && [[ -n ${CAPTURE_ID:-} ]]; then
-    docker logs "$CAPTURE_ID" > "$EVIDENCE/capture.log" 2>&1 || true
-    docker stop --time 20 "$CAPTURE_ID" >/dev/null 2>&1 || true
-    echo "Candidate capture failed; inspected/stopped only $CAPTURE_ID; evidence: $EVIDENCE" >&2
+    timeout 20s docker logs "$CAPTURE_ID" > "$EVIDENCE/capture.log" 2>&1 || true
+    if ! timeout 30s docker stop --time 20 "$CAPTURE_ID" >/dev/null 2>&1; then
+      echo "Candidate capture stop unconfirmed; operator must inspect $CAPTURE_ID" >&2
+    fi
+    if ! timeout 120s python3 "$GATES" verify-prefix --raw-dir "$RAW_DIR" \
+      --inventory "$EVIDENCE/raw-pre-capture.json" --output "$EVIDENCE/raw-failure-prefix.json"; then
+      echo 'Post-failure raw prefix verification inconclusive or failed; retain evidence' >&2
+    fi
+    echo "Candidate capture failed; evidence: $EVIDENCE" >&2
   fi
 }
 trap cleanup_on_failure EXIT
@@ -188,30 +231,11 @@ docker logs "$CAPTURE_ID" > "$EVIDENCE/capture.log" 2>&1
 docker inspect --format '{{json .State}}' "$CAPTURE_ID" > "$EVIDENCE/capture-state.json"
 docker inspect --format 'Memory={{.HostConfig.Memory}} NanoCpus={{.HostConfig.NanoCpus}} PidsLimit={{.HostConfig.PidsLimit}}' \
   "$CAPTURE_ID" > "$EVIDENCE/capture-limits.txt"
-python3 - "$EVIDENCE" "$PREVIOUS_SESSION" <<'PY'
-import json, pathlib, re, sys
-p=pathlib.Path(sys.argv[1]); prior=sys.argv[2]
-state=json.loads((p/'capture-state.json').read_text())
-assert state['Status']=='exited' and state['ExitCode']==0 and not state['OOMKilled']
-lines=(p/'capture.log').read_text().splitlines()
-summaries=[]
-for line in lines:
-    try: value=json.loads(line)
-    except ValueError: continue
-    if isinstance(value, dict) and 'written_events' in value: summaries.append(value)
-assert len(summaries)==1, 'Expected exactly one completed capture summary'
-s=summaries[0]; sid=s['session_id']
-assert re.fullmatch(r'[0-9a-f]{32}', sid) and sid!=prior
-assert s['status']=='ok' and s['written_events']==1000 and s['last_ingest_sequence']==1000
-assert s['depth_events']>=1 and s['trade_events']>=0 and s['depth_events']+s['trade_events']==999
-assert s['gap_count']==0 and s['ordering_version']=='session-applied-v1'
-(p/'capture-summary.json').write_text(json.dumps({'session_id':sid,'book_snapshot':1,
-    'book_delta':s['depth_events'],'trade':s['trade_events'],'records':1000},sort_keys=True)+'\n')
-samples=[json.loads(line) for line in (p/'collector-stats.jsonl').read_text().splitlines() if line.strip()]
-assert samples and any(x.get('MemUsage') and not x['MemUsage'].startswith('0B') for x in samples), 'No live resource sample'
-print('New completed session and exact counts:',(p/'capture-summary.json').read_text().strip())
-print('Live collector resource samples:',len(samples))
-PY
+# Every pre-existing inode must still exist, be at least as large, and retain
+# exactly its original-length SHA-256 prefix. Appends/new files are permitted.
+python3 "$GATES" verify-prefix --raw-dir "$RAW_DIR" --inventory "$EVIDENCE/raw-pre-capture.json" \
+  --output "$EVIDENCE/raw-post-capture-prefix.json"
+python3 "$GATES" check-capture --evidence-dir "$EVIDENCE" --previous-session "$PREVIOUS_SESSION"
 CAPTURE_COMPLETE=1
 # The capture has exited; only read-only audit/replay one-off containers follow.
 read -r SESSION_ID SNAPSHOTS DEPTH_COUNT TRADE_COUNT < <(python3 - "$EVIDENCE/capture-summary.json" <<'PY'
@@ -222,42 +246,19 @@ PY
 )
 RAW_DIR=$VOLUME_MOUNT/raw
 shopt -s nullglob
-raw_files=( "$RAW_DIR"/binance_btcusdt_depth_*.jsonl "$RAW_DIR"/binance_btcusdt_trade_*.jsonl )
+raw_files=( "$RAW_DIR"/*.jsonl )
 (( ${#raw_files[@]} > 0 && ${#raw_files[@]} <= 64 ))
+# These full-file hashes are captured after the append-permitted capture, before read-only replay.
 sha256sum -- "${raw_files[@]}" > "$EVIDENCE/raw-before.sha256"
-docker run --rm --network none --env-file "$RELEASE/.env" --env SIGNAL_DESK_CONFIG=/app/config/config.yaml --env PYTHONOPTIMIZE=0 \
-  --mount "$CONFIG_MOUNT" --mount "$DATA_READ_MOUNT" "$IMAGE" python -u -m signal_desk.tools.audit_raw \
+run_bounded 300s audit --mount "$DATA_READ_MOUNT" "$IMAGE" python -u -m signal_desk.tools.audit_raw \
   --raw-dir /data/raw --session-id "$SESSION_ID" --expected-snapshots "$SNAPSHOTS" \
   --expected-depth "$DEPTH_COUNT" --expected-trades "$TRADE_COUNT" > "$EVIDENCE/raw-audit.json"
 for run in 1 2; do
-  docker run --rm --network none --env-file "$RELEASE/.env" --env SIGNAL_DESK_CONFIG=/app/config/config.yaml --env PYTHONOPTIMIZE=0 \
-    --mount "$CONFIG_MOUNT" --mount "$DATA_READ_MOUNT" "$IMAGE" python -u -m signal_desk.replay.session \
+  run_bounded 600s replay-$run --mount "$DATA_READ_MOUNT" "$IMAGE" python -u -m signal_desk.replay.session \
     --raw-dir /data/raw --session-id "$SESSION_ID" --expected-snapshots "$SNAPSHOTS" \
     --expected-depth "$DEPTH_COUNT" --expected-trades "$TRADE_COUNT" > "$EVIDENCE/replay-$run.json"
 done
-python3 - "$EVIDENCE" "$SESSION_ID" "$SNAPSHOTS" "$DEPTH_COUNT" "$TRADE_COUNT" <<'PY'
-import json, pathlib, re, sys
-p=pathlib.Path(sys.argv[1]); sid=sys.argv[2]
-expected={'book_snapshot':int(sys.argv[3]),'book_delta':int(sys.argv[4]),'trade':int(sys.argv[5])}
-assert sum(expected.values())==1000
-results=[json.loads((p/f'replay-{n}.json').read_text()) for n in (1,2)]
-audit=json.loads((p/'raw-audit.json').read_text())
-assert audit['status']=='ok' and audit['session_id']==sid and audit['counts']==expected and audit['selected_records']==1000
-for r in results:
-    assert r['status']=='ok' and r['session_id']==sid and r['counts']==expected
-    assert r['records']==1000 and r['expected_counts_checked'] is True
-    assert r['capture_hashes_verified']==1000 and r['last_ingest_sequence']==1000
-    assert re.fullmatch(r'[0-9a-f]{64}',r['feature_sha256'])
-assert results[0]['feature_sha256']==results[1]['feature_sha256']
-assert results[0]['files']==results[1]['files']==audit['files'] or (
-    {(f['file'],f['sha256'],f['bytes'],f['lines']) for f in results[0]['files']} ==
-    {(f['file'],f['sha256'],f['bytes'],f['lines']) for f in results[1]['files']} ==
-    {(f['file'],f['sha256'],f['bytes'],f['lines']) for f in audit['files']})
-manifest={pathlib.Path(line[66:]).name:line[:64] for line in (p/'raw-before.sha256').read_text().splitlines()}
-assert {f['file']:f['sha256'] for f in results[0]['files']}==manifest
-print('Replay parity: 1000 hashes checked twice; feature_sha256 identical:',results[0]['feature_sha256'])
-print('Input files with matching whole-file SHA-256:',len(manifest))
-PY
+python3 "$GATES" check-replays --evidence-dir "$EVIDENCE"
 sha256sum -c --status "$EVIDENCE/raw-before.sha256"
 sha256sum -- "${raw_files[@]}" > "$EVIDENCE/raw-after.sha256"
 cmp -s -- "$EVIDENCE/raw-before.sha256" "$EVIDENCE/raw-after.sha256"
