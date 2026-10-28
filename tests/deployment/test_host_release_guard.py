@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import tempfile
 
 import pytest
 
@@ -28,8 +29,16 @@ def git(repo, *args):
 
 
 @pytest.fixture
-def release(tmp_path):
-    repo = tmp_path / "protected" / "release"
+def protected_tmp_path():
+    # ROOT is owner-writable but has protected ancestors in the collector image;
+    # pytest's default /tmp is intentionally rejected by the production guard.
+    with tempfile.TemporaryDirectory(prefix=".release-test-", dir=ROOT) as folder:
+        yield Path(folder)
+
+
+@pytest.fixture
+def release(protected_tmp_path):
+    repo = protected_tmp_path / "protected" / "release"
     repo.mkdir(parents=True)
     git(repo, "init", "-q")
     git(repo, "config", "user.name", "Local test")
@@ -70,29 +79,40 @@ def test_writable_or_replaceable_release_inputs_are_rejected(release):
     g.verify_release(manifest, owner_uid=os.getuid(), mount_sources=[], observed_volume_identity=manifest["volume_identity"])
     path = repo / "code.py"
     path.chmod(0o666)
-    with pytest.raises(g.ReleaseError, match="writable"):
+    with pytest.raises(g.ReleaseError, match="Writable"):
         g.verify_release(manifest, owner_uid=os.getuid(), mount_sources=[], observed_volume_identity=manifest["volume_identity"])
     path.chmod(0o644)
     parent = repo.parent
     parent.chmod(0o777)
     try:
-        with pytest.raises(g.ReleaseError, match="writable"):
+        with pytest.raises(g.ReleaseError, match="Writable"):
             g.verify_release(manifest, owner_uid=os.getuid(), mount_sources=[], observed_volume_identity=manifest["volume_identity"])
     finally:
         parent.chmod(0o755)
 
 
+def test_world_writable_tmp_ancestor_remains_rejected():
+    if not Path("/tmp").stat().st_mode & 0o022:
+        pytest.skip("/tmp is not group/world writable on this runner")
+    g = guard()
+    with tempfile.TemporaryDirectory(dir="/tmp") as folder:
+        with pytest.raises(g.ReleaseError, match="Writable protected path: /tmp"):
+            g.protected_path(folder, owner_uid=os.getuid())
+
+
 def test_non_root_owned_release_is_rejected(release):
     repo, manifest, g = release
     if os.getuid() == 0:
-        pytest.skip("This local ownership check needs an unprivileged test user")
+        # The collector image runs as root: make only the fixture checkout
+        # unapproved, without weakening the verifier's root-only policy.
+        repo.chown(12345, -1)
     with pytest.raises(g.ReleaseError, match="Unapproved owner"):
         g.verify_release(manifest, owner_uid=0, mount_sources=[], observed_volume_identity=manifest["volume_identity"])
 
 
-def test_symlinked_release_input_is_rejected(release, tmp_path):
+def test_symlinked_release_input_is_rejected(release, protected_tmp_path):
     repo, manifest, g = release
-    external = tmp_path / "mutable-code.py"
+    external = protected_tmp_path / "mutable-code.py"
     external.write_text("value = 1\n")
     (repo / "code.py").unlink()
     (repo / "code.py").symlink_to(external)

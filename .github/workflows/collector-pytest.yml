@@ -1,0 +1,23 @@
+name: Collector image tests
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  full-pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build collector image
+        run: docker build --tag signal-desk-collector:pr .
+      - name: Run full pytest inside collector image
+        run: |
+          docker run --rm --network none signal-desk-collector:pr \
+            sh -ec 'git --version; python -m pytest -q'
