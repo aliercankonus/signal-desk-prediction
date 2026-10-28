@@ -85,7 +85,8 @@ class CausalFeaturePipeline:
         receipt = event["monotonic_ns"]
         if receipt > ns:
             raise ValueError("Event receipt occurs after application")
-        utc_time(event["received_ts"])
+        if utc_time(event["received_ts"]) > at:
+            raise ValueError("Receipt wall clock occurs after application")
         utc_time(event["exchange_ts"])
         kind = event["event_type"]
         if seq == 1 and kind != "book_snapshot":

@@ -44,6 +44,7 @@ def capture(tmp_path, monkeypatch):
         applied["ns"] += advance_ns
         applied["at"] = (base + timedelta(microseconds=applied["index"])).isoformat()
         event["monotonic_ns"] = receipt_ns if receipt_ns is not None else applied["ns"] - 100
+        event["received_ts"] = base.isoformat()
         collector.write_event(config, event)
     emit(map_snapshot({"lastUpdateId": 10, "bids": [["100", "2"]], "asks": [["102", "1"]]},
                       received_ts="2026-10-28T00:00:00Z"))
@@ -124,7 +125,7 @@ def test_cross_day_partitions_keep_application_sequence(capture):
 
 
 @pytest.mark.parametrize("change", ["legacy", "missing", "duplicate", "reverse", "hash", "version",
-                                    "policy", "wall_clock", "monotonic", "receipt", "previous_id",
+                                    "policy", "wall_clock", "monotonic", "receipt", "receipt_wall", "previous_id",
                                     "depth_gap", "side", "trade_id", "crossed"])
 def test_corrupt_selected_data_fails_without_published_output(capture, tmp_path, change):
     raw, session, emit, trade, depth, online, config = capture
@@ -142,6 +143,7 @@ def test_corrupt_selected_data_fails_without_published_output(capture, tmp_path,
     elif change == "wall_clock": quality["applied_ts"] = "2025-01-01T00:00:00Z"
     elif change == "monotonic": quality["applied_monotonic_ns"] = 1
     elif change == "receipt": events[1]["monotonic_ns"] = quality["applied_monotonic_ns"] + 1
+    elif change == "receipt_wall": events[1]["received_ts"] = "2027-01-01T00:00:00Z"
     elif change == "previous_id": events[1]["previous_final_update_id"] = 0
     elif change == "depth_gap": events[1].update(first_update_id=20, final_update_id=21)
     elif change == "crossed": events[1]["bids"] = [["103", "1"]]
