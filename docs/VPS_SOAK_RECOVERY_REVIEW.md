@@ -29,6 +29,13 @@ then compares one read-only raw audit and two read-only ordered replays. It
 checks every captured feature hash and positive `ready_features` through the
 existing replay/soak gates. Counts derived from raw data are **not independent
 completion evidence**, even if a replay reports `expected_counts_checked`.
+Before either audit or replay, the procedure must also match the separately
+**operator-reported collector totals**: one snapshot, 35,936 depth deltas,
+222,238 trades, 258,175 records. These figures were supplied for this review;
+the assistant did **not** inspect host status or raw evidence to verify them.
+An inconsistent reported total or any difference from raw-derived counts stops
+the procedure. The comparison is stored with that provenance, not as a host
+read-back or proof of capture completion.
 The output says `RECOVERY_DIAGNOSTICS_OK`, never `SOAK_OK` or acceptance. A
 partial/absent original pre-inventory, a changed original prefix, unsupported
 ordering, count mismatch, hash mismatch or budget exhaustion blocks success;
@@ -57,11 +64,13 @@ in Git:
 |---|---|
 | `RECOVERY_ORIGINAL_EVIDENCE` | Original private interrupted-soak evidence directory; leave untouched. Must contain the pre-capture inventory and recorded active/candidate identity files. |
 | `RECOVERY_EVIDENCE_PARENT` | Separate pre-existing root-only parent, outside original evidence, releases, data volume and agent mounts, for a fresh recovery evidence directory. |
-| `RECOVERY_ACTIVE_SETTINGS`, `RECOVERY_CANDIDATE_SETTINGS` | Installed guard's original protected active/candidate approval JSON; paper mode and execution-disabled only. |
+| `RECOVERY_ACTIVE_SETTINGS`, `RECOVERY_CANDIDATE_SETTINGS` | Installed guard's protected active and currently reviewed candidate approval JSON; paper mode and execution-disabled only. The candidate approval's historical bytes are not established. |
 | `RECOVERY_GUARD` | Installed root-owned release verifier. |
 | `RECOVERY_PRIOR_EVIDENCE`, `RECOVERY_CONFIG_DIR` | Original protected acceptance evidence (including active HEAD) and original staged candidate `.env`/config; both remain unchanged. |
 | `RECOVERY_REMOTE`, `RECOVERY_IMAGE_REPO` | Independently reviewed repository URL and candidate image repository; both original Git origins and the immutable image tag/ID must match. |
-| `RECOVERY_EXPECTED_ACTIVE_HEAD`, `RECOVERY_EXPECTED_CANDIDATE_APPROVAL_SHA256` | Independently recorded **pre-interruption** active commit and candidate approval-file digest, from a private trusted operator record (not recomputed from today's files). Stop if unavailable; original soak evidence alone does not bind both values. |
+| `RECOVERY_EXPECTED_ACTIVE_HEAD` | Independently recorded pre-interruption active commit from the protected prior acceptance record. |
+| `RECOVERY_OPERATOR_APPROVED_CURRENT_APPROVAL_SHA256`, `RECOVERY_CURRENT_BASELINE_APPROVAL` | Digest of the **current** installed candidate approval, explicitly reviewed and approved by the root operator for recovery, and the exact declaration `operator-approved-current-recovery-baseline`. The earlier procedures did not record a historical candidate-approval digest. Never call this digest pre-interruption or infer that approval bytes were unchanged. |
+| `RECOVERY_EXPECTED_SNAPSHOTS`, `RECOVERY_EXPECTED_DEPTH`, `RECOVERY_EXPECTED_TRADES`, `RECOVERY_EXPECTED_TOTAL` | Separately supplied operator-reported collector totals, respectively `1`, `35936`, `222238`, `258175`. The script pins this tuple and rejects absent or different input; the helper checks total arithmetic and exact agreement with the existing raw session **before** audit/replay. |
 | `RECOVERY_EXPECTED_HOST` | Independently confirmed hostname matching both approvals. |
 | `RECOVERY_AGENT_NAME_FILTER` | Operator-reviewed filter covering existing and replacement agent containers for mount isolation. |
 
@@ -74,7 +83,10 @@ config hash manifests still pass, no other collector/volume writer is running,
 and new/original evidence is isolated from agent mounts. It creates **one new**
 private recovery evidence directory only after these read-only preflights.
 No original evidence file is overwritten. It checks the original flat evidence
-file set and hashes before and after the diagnostics.
+file set and hashes before and after the diagnostics. A new private baseline
+record labels the candidate approval digest **current and operator-approved**,
+with `historical_approval_unchanged_verified=false`; the count-comparison
+record labels the totals **operator-reported, not directly host-inspected**.
 
 After separate approval, an operator would invoke the staged script with
 `bash` and the reviewed exports in scope; **that invocation is not part of
@@ -91,13 +103,14 @@ host operator must inspect any inconclusive cleanup before retrying.
 
 ## Interpretation and remaining gates
 
-The independent stop reason, container exit/OOM status, duration, resource
-samples, gaps/reconnects and all original evidence still need direct private
+The independent stop reason, container exit/OOM status, duration, gaps/reconnects
+and all original evidence still need direct private
 operator inspection. A matching audit and two replays would show only stored
 session consistency, not complete duration, exchange completeness, economic
-acceptance, or a safe deployment. If independent expected counts or a complete
-original stop record are missing, label the result **diagnostic only** and do
-not promote it to a soak pass. Retain the new and original private evidence,
+acceptance, or a safe deployment. **Resource sampling is incomplete**, so even
+matching operator-reported counts, audit and two replays cannot yield a full
+soak pass. A missing original stop record also prevents such a claim. Retain
+the new and original private evidence,
 including raw hashes, recorded IDs/counts, audit and replay JSON and operator
 inspection notes. Never publish private host paths, configs, logs or data in
 this PR.

@@ -18,7 +18,9 @@ required=(RECOVERY_ORIGINAL_EVIDENCE RECOVERY_EVIDENCE_PARENT RECOVERY_ACTIVE_SE
   RECOVERY_CANDIDATE_SETTINGS RECOVERY_GUARD RECOVERY_EXPECTED_HOST
   RECOVERY_AGENT_NAME_FILTER RECOVERY_PRIOR_EVIDENCE RECOVERY_CONFIG_DIR
   RECOVERY_REMOTE RECOVERY_IMAGE_REPO RECOVERY_EXPECTED_ACTIVE_HEAD
-  RECOVERY_EXPECTED_CANDIDATE_APPROVAL_SHA256)
+  RECOVERY_OPERATOR_APPROVED_CURRENT_APPROVAL_SHA256 RECOVERY_CURRENT_BASELINE_APPROVAL
+  RECOVERY_EXPECTED_SNAPSHOTS RECOVERY_EXPECTED_DEPTH RECOVERY_EXPECTED_TRADES
+  RECOVERY_EXPECTED_TOTAL)
 for key in "${required[@]}"; do
   [[ -n ${!key:-} ]] || { printf 'Missing operator-reviewed parameter: %s\n' "$key" >&2; exit 2; }
 done
@@ -33,7 +35,9 @@ CONFIG_DIR=$RECOVERY_CONFIG_DIR
    $RECOVERY_AGENT_NAME_FILTER =~ ^[A-Za-z0-9_.-]+$ &&
    $RECOVERY_IMAGE_REPO =~ ^[a-z0-9][a-z0-9._-]*$ &&
    $RECOVERY_EXPECTED_ACTIVE_HEAD =~ ^[0-9a-f]{40}$ &&
-   $RECOVERY_EXPECTED_CANDIDATE_APPROVAL_SHA256 =~ ^[0-9a-f]{64}$ ]]
+   $RECOVERY_OPERATOR_APPROVED_CURRENT_APPROVAL_SHA256 =~ ^[0-9a-f]{64}$ &&
+   $RECOVERY_CURRENT_BASELINE_APPROVAL == operator-approved-current-recovery-baseline &&
+   "$RECOVERY_EXPECTED_SNAPSHOTS|$RECOVERY_EXPECTED_DEPTH|$RECOVERY_EXPECTED_TRADES|$RECOVERY_EXPECTED_TOTAL" == "1|35936|222238|258175" ]]
 for path in "$SCRIPT" "$GATES" "$SOAK_GATES" "$BASE_GATES" "$ORIGINAL" "$PARENT" \
             "$ACTIVE_SETTINGS" "$CANDIDATE_SETTINGS" "$GUARD" "$PRIOR" "$CONFIG_DIR"; do
   [[ $path == /* && ! -L $path ]] || { echo 'Absolute nonsymlink protected paths required' >&2; exit 2; }
@@ -74,7 +78,7 @@ RELEASE=${candidate_fields[0]}
 [[ $(stat -c %s "$PRIOR/active-head.txt") -le 128 &&
    $(<"$PRIOR/active-head.txt") == "$RECOVERY_EXPECTED_ACTIVE_HEAD" &&
    $(stat -c %s "$CANDIDATE_SETTINGS") -le 4194304 &&
-   $(sha256sum "$CANDIDATE_SETTINGS" | cut -d' ' -f1) == "$RECOVERY_EXPECTED_CANDIDATE_APPROVAL_SHA256" ]]
+   $(sha256sum "$CANDIDATE_SETTINGS" | cut -d' ' -f1) == "$RECOVERY_OPERATOR_APPROVED_CURRENT_APPROVAL_SHA256" ]]
 [[ $(git -c "safe.directory=$ACTIVE_REPO" -C "$ACTIVE_REPO" rev-parse HEAD) == "$RECOVERY_EXPECTED_ACTIVE_HEAD" &&
    $(git -c "safe.directory=$RELEASE" -C "$RELEASE" remote get-url origin) == "$RECOVERY_REMOTE" &&
    $(git -c "safe.directory=$ACTIVE_REPO" -C "$ACTIVE_REPO" remote get-url origin) == "$RECOVERY_REMOTE" &&
@@ -126,7 +130,7 @@ verify_active() {
      $(stat -c %s "$PRIOR/active-head.txt") -le 128 &&
      $(<"$PRIOR/active-head.txt") == "$RECOVERY_EXPECTED_ACTIVE_HEAD" &&
      $(stat -c %s "$CANDIDATE_SETTINGS") -le 4194304 &&
-     $(sha256sum "$CANDIDATE_SETTINGS" | cut -d' ' -f1) == "$RECOVERY_EXPECTED_CANDIDATE_APPROVAL_SHA256" ]] &&
+     $(sha256sum "$CANDIDATE_SETTINGS" | cut -d' ' -f1) == "$RECOVERY_OPERATOR_APPROVED_CURRENT_APPROVAL_SHA256" ]] &&
   timeout 180s sha256sum -c --status "$ORIGINAL/active-inputs.sha256" &&
   timeout 180s sha256sum -c --status "$ORIGINAL/candidate-config.sha256" &&
   [[ $(timeout 15s git -c "safe.directory=$ACTIVE_REPO" -C "$ACTIVE_REPO" rev-parse HEAD) == "$RECOVERY_EXPECTED_ACTIVE_HEAD" ]] &&
@@ -215,14 +219,24 @@ timeout 1800s python3 "$GATES" freeze-original --original "$ORIGINAL" \
   --output "$RECOVERY/original-evidence.sha256"
 timeout 1800s python3 "$GATES" verify-original --original "$ORIGINAL" \
   --manifest "$RECOVERY/original-evidence.sha256"
+python3 "$GATES" record-baseline \
+  --approval-sha256 "$RECOVERY_OPERATOR_APPROVED_CURRENT_APPROVAL_SHA256" \
+  --approval-declaration "$RECOVERY_CURRENT_BASELINE_APPROVAL" \
+  --output "$RECOVERY/current-recovery-baseline.json"
 date -u +%Y-%m-%dT%H:%M:%SZ > "$RECOVERY/start-utc.txt"
 timeout 1800s python3 "$GATES" derive --raw-dir "$RAW_DIR" \
   --pre-inventory "$ORIGINAL/raw-pre-capture.json" --session-id "$SID" \
   --output "$RECOVERY/derived-counts.json"
-mapfile -t counts < <(python3 - "$RECOVERY/derived-counts.json" <<'PY'
+python3 "$GATES" compare-counts --summary "$RECOVERY/derived-counts.json" \
+  --expected-snapshots "$RECOVERY_EXPECTED_SNAPSHOTS" \
+  --expected-depth "$RECOVERY_EXPECTED_DEPTH" \
+  --expected-trades "$RECOVERY_EXPECTED_TRADES" \
+  --expected-total "$RECOVERY_EXPECTED_TOTAL" \
+  --output "$RECOVERY/operator-counts-compared.json"
+mapfile -t counts < <(python3 - "$RECOVERY/operator-counts-compared.json" <<'PY'
 import json, sys
 v=json.load(open(sys.argv[1])); assert v['session_id']=='cb8a0767d7284b8aaa3d09fbca7095f2'
-for key in ('book_snapshot','book_delta','trade'): print(v['counts'][key])
+for key in ('book_snapshot','book_delta','trade'): print(v['operator_reported_collector_totals'][key])
 PY
 )
 [[ ${#counts[@]} -eq 3 && ${counts[0]} == 1 && ${counts[1]} =~ ^[1-9][0-9]*$ &&
@@ -265,6 +279,8 @@ timeout 1800s python3 "$GATES" verify-raw --raw-dir "$RAW_DIR" \
 timeout 1800s python3 "$GATES" verify --raw-dir "$RAW_DIR" --summary "$RECOVERY/derived-counts.json" \
   --audit "$RECOVERY/audit.json" --replay-one "$RECOVERY/replay-1.json" \
   --replay-two "$RECOVERY/replay-2.json" --manifest "$RECOVERY/raw-before.sha256" \
+  --operator-counts "$RECOVERY/operator-counts-compared.json" \
+  --baseline "$RECOVERY/current-recovery-baseline.json" \
   --output "$RECOVERY/diagnostics.json"
 timeout 1800s python3 "$GATES" verify-raw --raw-dir "$RAW_DIR" \
   --manifest "$RECOVERY/raw-before.sha256"

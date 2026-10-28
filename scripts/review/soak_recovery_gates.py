@@ -196,6 +196,36 @@ def derive(raw_dir, pre, session_id):
             "independent_completion_verified": False, "soak_acceptance": False}
 
 
+def compare_operator_counts(derived, reported):
+    """Gate audit/replay on totals supplied apart from raw-data derivation."""
+    keys = {"book_snapshot", "book_delta", "trade", "records"}
+    if (not isinstance(derived, dict) or derived.get("session_id") != TARGET_SID or
+        not isinstance(reported, dict) or set(reported) != keys or
+        any(type(value) is not int or value <= 0 for value in reported.values()) or
+        reported["book_snapshot"] != 1):
+        raise ValueError("Invalid operator-reported collector totals")
+    if sum(reported[name] for name in ("book_snapshot", "book_delta", "trade")) != reported["records"]:
+        raise ValueError("inconsistent operator-reported total")
+    if derived.get("counts") != {name: reported[name] for name in ("book_snapshot", "book_delta", "trade")} or derived.get("records") != reported["records"]:
+        raise ValueError("operator-reported counts mismatch raw-derived counts")
+    return {"session_id": TARGET_SID, "operator_reported_collector_totals": reported,
+            "provenance": "operator_report_not_direct_host_inspection",
+            "raw_derived_counts_match": True, "independent_completion_verified": False,
+            "resource_sampling_complete": False, "soak_acceptance": False}
+
+
+def approve_current_baseline(approval_digest, declaration):
+    """Record an operator-approved CURRENT baseline, not a historical digest."""
+    if not isinstance(approval_digest, str) or not SHA.fullmatch(approval_digest):
+        raise ValueError("Invalid current candidate approval digest")
+    if declaration != "operator-approved-current-recovery-baseline":
+        raise ValueError("Explicit current-only operator approval required")
+    return {"provenance": "operator_approved_current_recovery_baseline",
+            "candidate_approval_sha256": approval_digest,
+            "historical_approval_unchanged_verified": False,
+            "resource_sampling_complete": False, "soak_acceptance": False}
+
+
 def verify_current_raw(raw_dir, manifest):
     if not isinstance(manifest, dict) or not 1 <= len(manifest) <= MAX_RAW_FILES:
         raise ValueError("Missing or oversized frozen raw manifest")
@@ -210,7 +240,7 @@ def verify_current_raw(raw_dir, manifest):
     verify_raw_set(raw_dir, manifest)
 
 
-def verify(derived, audit, replays, manifest, raw_dir):
+def verify(derived, audit, replays, manifest, raw_dir, comparison, baseline):
     """Compare completed diagnostics; never declare a recovered soak success."""
     if (not isinstance(derived, dict) or derived.get("session_id") != TARGET_SID or
         derived.get("counts_origin") != "raw_appended_bytes_not_independent_completion_evidence" or
@@ -222,6 +252,23 @@ def verify(derived, audit, replays, manifest, raw_dir):
         any(type(n) is not int for n in counts.values()) or
         derived.get("records") != sum(counts.values())):
         raise ValueError("Invalid derived recovery counts")
+    if not isinstance(comparison, dict):
+        raise ValueError("Invalid operator counts provenance")
+    try:
+        checked_comparison = compare_operator_counts(derived, comparison.get("operator_reported_collector_totals"))
+    except ValueError as exc:
+        raise ValueError("Invalid operator counts provenance") from exc
+    if comparison != checked_comparison:
+        raise ValueError("Invalid operator counts provenance")
+    if not isinstance(baseline, dict):
+        raise ValueError("Invalid current baseline provenance")
+    try:
+        checked_baseline = approve_current_baseline(
+            baseline.get("candidate_approval_sha256"), "operator-approved-current-recovery-baseline")
+    except ValueError as exc:
+        raise ValueError("Invalid current baseline provenance") from exc
+    if baseline != checked_baseline:
+        raise ValueError("Invalid current baseline provenance")
     verify_current_raw(raw_dir, manifest)
     expected = {"session_id": TARGET_SID, **counts, "records": derived["records"]}
     result = verify_session(expected, audit, replays, manifest)
@@ -232,6 +279,12 @@ def verify(derived, audit, replays, manifest, raw_dir):
             "ready_features": result["ready_features"],
             "files_checked": result["files_checked"],
             "counts_origin": derived["counts_origin"],
+            "operator_reported_collector_totals": comparison["operator_reported_collector_totals"],
+            "operator_counts_provenance": comparison["provenance"],
+            "approval_provenance": baseline["provenance"],
+            "candidate_approval_sha256": baseline["candidate_approval_sha256"],
+            "historical_approval_unchanged_verified": False,
+            "resource_sampling_complete": False,
             "independent_completion_verified": False, "soak_acceptance": False}
 
 
@@ -241,8 +294,17 @@ def main():
     first = sub.add_parser("derive")
     for name in ("raw-dir", "pre-inventory", "session-id", "output"):
         first.add_argument("--" + name, required=True)
+    counts = sub.add_parser("compare-counts")
+    counts.add_argument("--summary", required=True)
+    for name in ("expected-snapshots", "expected-depth", "expected-trades", "expected-total"):
+        counts.add_argument("--" + name, required=True, type=int)
+    counts.add_argument("--output", required=True)
+    baseline = sub.add_parser("record-baseline")
+    for name in ("approval-sha256", "approval-declaration", "output"):
+        baseline.add_argument("--" + name, required=True)
     final = sub.add_parser("verify")
-    for name in ("raw-dir", "summary", "audit", "replay-one", "replay-two", "manifest", "output"):
+    for name in ("raw-dir", "summary", "audit", "replay-one", "replay-two", "manifest",
+                 "operator-counts", "baseline", "output"):
         final.add_argument("--" + name, required=True)
     original = sub.add_parser("verify-original")
     original.add_argument("--original", required=True)
@@ -259,10 +321,17 @@ def main():
     try:
         if args.command == "derive":
             result = derive(args.raw_dir, load_bounded(args.pre_inventory), args.session_id)
+        elif args.command == "compare-counts":
+            reported = {"book_snapshot": args.expected_snapshots, "book_delta": args.expected_depth,
+                        "trade": args.expected_trades, "records": args.expected_total}
+            result = compare_operator_counts(load_bounded(args.summary), reported)
+        elif args.command == "record-baseline":
+            result = approve_current_baseline(args.approval_sha256, args.approval_declaration)
         elif args.command == "verify":
             result = verify(load_bounded(args.summary), load_bounded(args.audit),
                             [load_bounded(args.replay_one), load_bounded(args.replay_two)],
-                            parse_raw_manifest(args.manifest, args.raw_dir), args.raw_dir)
+                            parse_raw_manifest(args.manifest, args.raw_dir), args.raw_dir,
+                            load_bounded(args.operator_counts), load_bounded(args.baseline))
         elif args.command == "freeze-raw":
             freeze_raw(args.raw_dir, args.output)
             return 0
