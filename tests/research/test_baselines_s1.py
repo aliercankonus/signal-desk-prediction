@@ -23,7 +23,7 @@ SID = "c" * 32
 def fixture(tmp_path, times=(0, 1, 2, 30, 30, 60, 60, 90, 90, 120, 120,
                              150, 150, 180, 180, 210, 210, 240, 240,
                              270, 270, 300, 300, 330, 330, 360, 360), policy=None,
-            wide_ask_at=None):
+            wide_ask_at=None, ask_updates=None):
     raw = tmp_path / "raw"
     raw.mkdir()
     pipeline = CausalFeaturePipeline(SID, policy)
@@ -41,8 +41,9 @@ def fixture(tmp_path, times=(0, 1, 2, 30, 30, 60, 60, 90, 90, 120, 120,
             depth_id += 1
             event = map_depth_delta({"U": depth_id, "u": depth_id, "E": 1,
                                      "b": [["100", str(2 + index % 3)]],
-                                     "a": [["100.10", "0"], ["102", "1"]]
-                                          if second == wide_ask_at else []})
+                                     "a": (ask_updates or {}).get(second,
+                                          [["100.10", "0"], ["102", "1"]]
+                                          if second == wide_ask_at else [])})
             event["previous_final_update_id"] = depth_id - 1
         event["exchange_ts"] = stamp
         event["received_ts"] = stamp
@@ -231,6 +232,48 @@ def test_momentum_lookback_requires_trade_freshness_at_lookback_cutoff(tmp_path)
              and r["horizon_seconds"] == 60}
     assert group["no_change_v1"]["prediction_status"] == "valid"
     assert group["momentum_60s_v1"]["prediction_status"] == "no_output"
+
+
+@pytest.mark.parametrize("invalid_asks", [
+    [["100.10", "0"], ["102", "1"]],
+    [["100.10", "0"]],
+])
+def test_momentum_never_falls_back_past_latest_invalid_lookback_state(tmp_path, invalid_asks):
+    restore = [["102", "0"], ["100.10", "1"]] if len(invalid_asks) == 2 else [["100.10", "1"]]
+    raw, manifest, spec, _ = fixture(tmp_path,
+        times=(0, 1, 2, 30, 30, 58, 58, 59, 59, 120, 120),
+        ask_updates={59: invalid_asks, 120: restore})
+    group = [r for r in run_research(raw, manifest, spec)
+             if r["prediction_at"] == "2026-10-28T00:02:00Z"]
+    assert len(group) == len(spec["candidates"]) * 2
+    assert {r["horizon_seconds"] for r in group} == {60, 300}
+    assert all({r["candidate"] for r in group if r["horizon_seconds"] == horizon}
+               == set(spec["candidates"]) for horizon in (60, 300))
+    assert all(r["prediction_status"] == "valid" for r in group
+               if r["candidate"] == "no_change_v1")
+    assert all(r["prediction_status"] == "no_output" and r["raw_score"] is None
+               for r in group if r["candidate"] == "momentum_60s_v1")
+    assert {r["prediction_at"] for r in group} == {"2026-10-28T00:02:00Z"}
+
+
+def test_momentum_valid_lookback_just_before_cutoff(tmp_path):
+    raw, manifest, spec, _ = fixture(tmp_path, times=(0, 1, 2, 30, 30, 58, 59, 120, 120))
+    target = [r for r in run_research(raw, manifest, spec)
+              if r["prediction_at"] == "2026-10-28T00:02:00Z"
+              and r["candidate"] == "momentum_60s_v1"]
+    assert len(target) == 2 and all(r["prediction_status"] == "valid" for r in target)
+
+
+def test_momentum_exact_lookback_cutoff_ignores_later_invalid_state(tmp_path):
+    raw, manifest, spec, _ = fixture(tmp_path,
+        times=(0, 1, 2, 30, 30, 59, 60, 61, 61, 120, 120),
+        ask_updates={61: [["100.10", "0"], ["102", "1"]],
+                     120: [["102", "0"], ["100.10", "1"]]})
+    target = [r for r in run_research(raw, manifest, spec)
+              if r["prediction_at"] == "2026-10-28T00:02:00Z"
+              and r["candidate"] == "momentum_60s_v1"]
+    assert len(target) == 2 and all(r["prediction_status"] == "valid" and
+                                    r["raw_score"] == "0.00000000" for r in target)
 
 
 def test_oversized_manifest_entry_fails_before_hashing(tmp_path):

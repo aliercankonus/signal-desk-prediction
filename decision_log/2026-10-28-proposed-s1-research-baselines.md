@@ -53,8 +53,10 @@ levels. Its reference score is `(proxy - midpoint)/spread`. The provisional S1
 raw score is `0.7 * trade_ratio + 0.3 * proxy_score`; the weights are fixed
 pre-results and **not optimized or probabilistic**. The no-change score is
 zero. Momentum is the 60-second causal midpoint change divided by the older
-midpoint, provided that older synchronized quote passes the fixed depth,
-trade and spread gates again at its lookback instant. These unitless/raw
+midpoint. Select the latest applied state at or before the lookback cutoff,
+including wide-spread or missing-book transitions; never fall back to an
+earlier valid quote. The selected state must pass the fixed depth, trade and
+spread gates again at the lookback instant. These unitless/raw
 scores are diagnostics, not comparable calibrated return predictions.
 
 A future shared live feature pipeline needs a **new version** with explicit

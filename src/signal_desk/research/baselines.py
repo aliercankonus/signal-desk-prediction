@@ -144,7 +144,7 @@ def run_research(raw_dir, manifest, spec, *, started=None):
     pipeline = None
     rows = []
     waiting = []
-    quotes = deque()
+    history = deque()
     flow = deque()
     last_snapshot = None
     last_depth = last_trade = None
@@ -196,9 +196,9 @@ def run_research(raw_dir, manifest, spec, *, started=None):
             raise ResearchError("Research runtime budget exhausted")
         while flow and flow[0][0] < at - timedelta(seconds=30):
             flow.popleft()
-        while quotes and quotes[0][0] < at - timedelta(seconds=65):
-            quotes.popleft()
-        if len(flow) > limits["max_window_events"] or len(quotes) > limits["max_window_events"]:
+        while history and history[0][0] < at - timedelta(seconds=65):
+            history.popleft()
+        if len(flow) > limits["max_window_events"] or len(history) > limits["max_window_events"]:
             raise ResearchError("Rolling research window event cap reached")
         quote = quote_value(last_snapshot) if last_snapshot is not None else None
         quality = ("warmup" if at < first_at + timedelta(seconds=60) else
@@ -206,7 +206,7 @@ def run_research(raw_dir, manifest, spec, *, started=None):
                    "stale" if not recent(at, last_depth, 2000) or not recent(at, last_trade, 3000) else
                    "spread" if (quote[1] - quote[0]) * 10000 / ((quote[1] + quote[0]) / 2) > 20 else "ok")
         midpoint = (quote[0] + quote[1]) / 2 if quality == "ok" else None
-        old = next((item for item in reversed(quotes)
+        old = next((item for item in reversed(history)
                     if item[0] <= at - timedelta(seconds=60)), None)
         if old is not None and (not recent(at - timedelta(seconds=60), old[0], 2000) or
                                 not acceptable_quote(at - timedelta(seconds=60),
@@ -289,14 +289,15 @@ def run_research(raw_dir, manifest, spec, *, started=None):
             qty = Decimal(event["trade_qty"])
             flow.append((at, qty if event["trade_side"] == "buy" else -qty))
         quote = quote_value(snapshot)
-        if quote is not None and acceptable_quote(at, quote, pipeline.bridged, last_depth, last_trade):
-            midpoint = (quote[0] + quote[1]) / 2
-            quotes.append((at, midpoint, quote, pipeline.bridged, last_depth, last_trade))
+        # Retain every applied state, including invalid or missing books: never
+        # replace the latest lookback state with an earlier acceptable quote.
+        midpoint = (quote[0] + quote[1]) / 2 if quote is not None else None
+        history.append((at, midpoint, quote, pipeline.bridged, last_depth, last_trade))
         for item in waiting:
             if at <= item["due"]:
                 item.update(quote=quote, depth_at=last_depth, trade_at=last_trade,
                             bridged=pipeline.bridged)
-        if len(flow) > limits["max_window_events"] or len(quotes) > limits["max_window_events"]:
+        if len(flow) > limits["max_window_events"] or len(history) > limits["max_window_events"]:
             raise ResearchError("Rolling research window event cap reached")
     if tick is not None and tick <= last_at:
         predict(tick)
