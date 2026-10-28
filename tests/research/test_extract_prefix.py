@@ -185,3 +185,44 @@ def test_output_ancestor_of_source_and_symlinked_parent_rejected(tmp_path):
     with pytest.raises(ExtractError, match="outside"):
         extract_fixture(raw, source_manifest(original), SPEC, alias / "nested",
                         synthetic_session_id=SID)
+
+
+@pytest.mark.parametrize("declared_total", [547115599, 768 * 1024 * 1024])
+def test_larger_bounded_source_reaches_reader_without_publishing(tmp_path, monkeypatch, declared_total):
+    raw, original, _, _ = fixture(tmp_path)
+    files = sorted(raw.glob("*.jsonl"))
+    size = declared_total - files[1].stat().st_size
+    with files[0].open("r+b") as stream:
+        stream.truncate(size)  # Sparse metadata fixture; do not scan its padding.
+    manifest = source_manifest(original)
+    for item in manifest["files"]:
+        if item["name"] == files[0].name:
+            item["bytes"] = size
+    class ReachedReader(Exception):
+        pass
+    def reader(*args, **kwargs):
+        raise ReachedReader
+    monkeypatch.setattr(extractor, "SessionInput", reader)
+    output = tmp_path / "not-published"
+    with pytest.raises(ReachedReader):
+        extract_fixture(raw, manifest, SPEC, output, synthetic_session_id=SID)
+    assert not output.exists()
+
+
+def test_above_source_ceiling_rejected_before_reader_or_publication(tmp_path, monkeypatch):
+    raw, original, _, _ = fixture(tmp_path)
+    files = sorted(raw.glob("*.jsonl"))
+    size = 768 * 1024 * 1024 + 1 - files[1].stat().st_size
+    with files[0].open("r+b") as stream:
+        stream.truncate(size)
+    manifest = source_manifest(original)
+    for item in manifest["files"]:
+        if item["name"] == files[0].name:
+            item["bytes"] = size
+    def forbidden_reader(*args, **kwargs):
+        pytest.fail("Source was scanned before enforcing declared byte ceiling")
+    monkeypatch.setattr(extractor, "SessionInput", forbidden_reader)
+    output = tmp_path / "not-published"
+    with pytest.raises(ExtractError, match="Source byte budget exhausted"):
+        extract_fixture(raw, manifest, SPEC, output, synthetic_session_id=SID)
+    assert not output.exists()

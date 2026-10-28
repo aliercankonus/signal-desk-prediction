@@ -75,9 +75,20 @@ resequencing, splitting lines, or changing feature digests.
 The prefix starts at sequence 1 and stops *before* the next record would exceed
 either 90,000 records or 128 MiB of serialized raw JSONL. It must contain the
 starting snapshot and depth bridge. Separate source ceilings are 64 files,
-512 MiB of predeclared raw input, 350,000 selected source records, 4 MiB per
-record, and a cooperative 900-second runtime budget. The source must be stopped;
-metadata and identity checks detect ordinary changes, not adversarial races.
+768 MiB (805,306,368 bytes) of predeclared raw input, 350,000 selected source
+records, 4 MiB per record, and a cooperative 900-second runtime budget. The
+operator-reported collector `raw_bytes=547115599` is a **storage total**, not an
+independently verified sum of the recognized raw COPY files. It exceeds the old
+512 MiB (536,870,912-byte) source ceiling; 768 MiB provides explicit bounded
+headroom without raising the 90,000-record / 128 MiB output caps or any baseline
+runner limit. Before execution, derive the **exact recognized source-file sum**
+from the completed copy's independently verified manifest (every recognized
+file's size and SHA-256); do not substitute reported `raw_bytes` for that sum.
+The extractor checks each declared size and the aggregate ceiling before scanning,
+then verifies whole-file hashes while streaming the full source. A manifest sum
+above 768 MiB must fail closed and needs separate review, not an automatic limit
+increase. The source must be stopped; metadata and identity checks detect
+ordinary changes, not adversarial races.
 
 On complete verification it writes `extraction-v1.json` (source identity,
 per-file hashes, full and selected counts, sequence/timestamp range, selection
