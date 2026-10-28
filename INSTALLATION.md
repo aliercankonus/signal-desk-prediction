@@ -235,7 +235,12 @@ isolation, clean code and approved config hashes **before** running Compose or
 repository code. SSH has no fetch, checkout, release selection or promotion
 operation. `validate` builds and tests the collector; `deploy` runs the existing
 bounded paper-only deploy script against the **same** Compose project/volume.
-These are future procedures, not evidence that a host setup has occurred.
+The exact operational sequence and evidence to record are in
+[docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md); the sanitized dated
+[operations ledger](docs/OPERATIONS_LEDGER.md) distinguishes direct evidence
+from operator reports. Failure diagnosis and Git metadata permission repair are
+in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). This documented procedure
+alone is not evidence that a new protected release has been approved on a host.
 
 **Security boundary:** Docker-backed validation/deployment executes the approved
 repository code with host privileges. Command filtering is not a sandbox. A

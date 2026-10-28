@@ -2,6 +2,8 @@
 
 Canonical installation: [INSTALLATION.md](INSTALLATION.md).
 Full manual command catalog: [docs/COMMANDS.md](docs/COMMANDS.md).
+Restricted gateway operations: [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
+Fail-closed diagnostics: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ## Existing checkout
 
