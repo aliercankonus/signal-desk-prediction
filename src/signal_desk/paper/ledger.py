@@ -371,6 +371,20 @@ class PaperLedger:
                            (entry["ledger_id"], encoded, entry["hash"], previous))
         return entry["hash"]
 
+    def _rollback_after_failure(self, original):
+        try:
+            self._conn.rollback()
+        except BaseException as rollback_error:
+            # An uncertain rollback is never a recoverable business rejection.
+            # Retain both failures explicitly; implicit exception chaining can
+            # otherwise hide the rejection that initiated the rollback.
+            self._halted = True
+            failures = BaseExceptionGroup(
+                "Original transaction failure and rollback failure",
+                [original, rollback_error])
+            raise PaperStorageError(
+                "Paper ledger rollback failed or uncertain; new risk blocked") from failures
+
     def _transaction(self, action):
         self._ready()
         try:
@@ -382,22 +396,16 @@ class PaperLedger:
             return result
         except (sqlite3.Error, OSError, PaperStorageError) as exc:
             self._halted = True
-            try:
-                self._conn.rollback()
-            except sqlite3.Error:
-                pass
+            self._rollback_after_failure(exc)
             raise PaperStorageError("Paper ledger write failed or became uncertain; new risk blocked") from exc
-        except Exception:
-            self._conn.rollback()
+        except Exception as exc:
+            self._rollback_after_failure(exc)
             raise
-        except BaseException:
+        except BaseException as exc:
             # KeyboardInterrupt/SystemExit cannot leave this connection able to
             # read its own uncommitted, apparently sendable outbox rows.
             self._halted = True
-            try:
-                self._conn.rollback()
-            except sqlite3.Error:
-                pass
+            self._rollback_after_failure(exc)
             raise
 
     def claim_writer(self, writer_id, *, expected_epoch):

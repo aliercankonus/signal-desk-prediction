@@ -52,6 +52,112 @@ def test_atomic_reservation_duplicate_and_restart_restore_pending_outbox(tmp_pat
     restored.close()
 
 
+class _RollbackFaultConnection:
+    """Forward every operation to real SQLite except injected rollback."""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def rollback(self):
+        raise sqlite3.OperationalError("synthetic rollback failure")
+
+
+@pytest.mark.parametrize("rejection,expected", [
+    ("duplicate", DuplicateConflict),
+    ("budget", BudgetExceeded),
+    ("version", StalePortfolio),
+])
+def test_failed_business_rollback_halts_and_preserves_both_errors(tmp_path, monkeypatch, rejection, expected):
+    path = tmp_path / "paper.sqlite3"
+    store = PaperLedger.create(path, cash_usdt="100", risk_budget_usdt="5")
+    epoch = store.claim_writer("writer-A", expected_epoch=0)
+    store.reserve(request(), writer_id="writer-A", writer_epoch=epoch)
+    rejected = {
+        "duplicate": replace(request(), fee_buffer_usdt="2"),
+        "budget": replace(request(signal_id="sig-2", portfolio_version=1), risk_reserve_usdt="4"),
+        "version": request(signal_id="sig-2", portfolio_version=0),
+    }[rejection]
+    monkeypatch.setattr(store, "_conn", _RollbackFaultConnection(store._conn))
+    with pytest.raises(PaperStorageError, match="rollback") as caught:
+        store.reserve(rejected, writer_id="writer-A", writer_epoch=epoch)
+    failures = caught.value.__cause__
+    assert isinstance(failures, BaseExceptionGroup)
+    assert len(failures.exceptions) == 2
+    assert isinstance(failures.exceptions[0], expected)
+    assert isinstance(failures.exceptions[1], sqlite3.OperationalError)
+    assert "synthetic rollback failure" in str(failures.exceptions[1])
+    with pytest.raises(Halted):
+        store.reserve(request(signal_id="sig-3", portfolio_version=1),
+                      writer_id="writer-A", writer_epoch=epoch)
+    with pytest.raises(Halted):
+        store.claim_writer("writer-B", expected_epoch=epoch)
+    with pytest.raises(Halted):
+        store.pending_outbox(writer_id="writer-A", writer_epoch=epoch)
+    with pytest.raises(Halted):
+        store.ledger_entries(writer_id="writer-A", writer_epoch=epoch)
+    store.close()
+
+    recovered = PaperLedger.open(path)
+    assert recovered.snapshot()["portfolio_version"] == 1
+    takeover = recovered.claim_writer("writer-B", expected_epoch=epoch)
+    assert len(recovered.pending_outbox(writer_id="writer-B", writer_epoch=takeover)) == 1
+    recovered.reserve(request(signal_id="sig-3", portfolio_version=1),
+                      writer_id="writer-B", writer_epoch=takeover)
+    recovered.close()
+
+
+@pytest.mark.parametrize("rejection,expected", [
+    ("duplicate", DuplicateConflict),
+    ("budget", BudgetExceeded),
+    ("version", StalePortfolio),
+])
+def test_successful_business_rollback_remains_recoverable(tmp_path, rejection, expected):
+    store = PaperLedger.create(tmp_path / "paper.sqlite3", cash_usdt="100", risk_budget_usdt="5")
+    epoch = store.claim_writer("writer-A", expected_epoch=0)
+    store.reserve(request(), writer_id="writer-A", writer_epoch=epoch)
+    rejected = {
+        "duplicate": replace(request(), fee_buffer_usdt="2"),
+        "budget": replace(request(signal_id="sig-2", portfolio_version=1), risk_reserve_usdt="4"),
+        "version": request(signal_id="sig-2", portfolio_version=0),
+    }[rejection]
+    with pytest.raises(expected):
+        store.reserve(rejected, writer_id="writer-A", writer_epoch=epoch)
+    assert len(store.pending_outbox(writer_id="writer-A", writer_epoch=epoch)) == 1
+    next_epoch = store.claim_writer("writer-B", expected_epoch=epoch)
+    store.reserve(request(signal_id="sig-3", portfolio_version=1),
+                  writer_id="writer-B", writer_epoch=next_epoch)
+    assert store.snapshot()["portfolio_version"] == 2
+    store.close()
+
+
+@pytest.mark.parametrize("failure_type", [OSError, KeyboardInterrupt])
+def test_failed_rollback_after_partial_intent_write_halts_and_recovers(tmp_path, monkeypatch, failure_type):
+    path = tmp_path / "paper.sqlite3"
+    store = PaperLedger.create(path, cash_usdt="100", risk_budget_usdt="5")
+    epoch = store.claim_writer("writer-A", expected_epoch=0)
+    def fail_after_outbox(**kwargs):
+        raise failure_type("synthetic failure after outbox insertion")
+    monkeypatch.setattr(store, "_append_ledger", fail_after_outbox)
+    monkeypatch.setattr(store, "_conn", _RollbackFaultConnection(store._conn))
+    with pytest.raises(PaperStorageError, match="rollback") as caught:
+        store.reserve(request(), writer_id="writer-A", writer_epoch=epoch)
+    failures = caught.value.__cause__
+    assert isinstance(failures, BaseExceptionGroup)
+    assert isinstance(failures.exceptions[0], failure_type)
+    assert isinstance(failures.exceptions[1], sqlite3.OperationalError)
+    with pytest.raises(Halted):
+        store.pending_outbox(writer_id="writer-A", writer_epoch=epoch)
+    store.close()
+    recovered = PaperLedger.open(path)
+    takeover = recovered.claim_writer("writer-B", expected_epoch=epoch)
+    assert recovered.pending_outbox(writer_id="writer-B", writer_epoch=takeover) == []
+    assert recovered.snapshot()["portfolio_version"] == 0
+    recovered.close()
+
+
 def test_concurrent_reservation_serializes_budget_and_portfolio_version(tmp_path):
     path = tmp_path / "paper.sqlite3"
     store = PaperLedger.create(path, cash_usdt="100", risk_budget_usdt="3")
