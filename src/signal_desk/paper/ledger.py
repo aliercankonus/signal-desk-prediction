@@ -25,8 +25,10 @@ MAX_INTENTS = 2048
 MAX_CLAIMS_PER_INTENT = 4
 MAX_FILLS_PER_INTENT = 16
 MAX_INCIDENTS_PER_INTENT = 8
+MAX_EVIDENCE_PER_INTENT = 32
+MAX_RESOLUTIONS_PER_INTENT = MAX_INCIDENTS_PER_INTENT
 LEASE_SECONDS = 30
-MAX_LEDGER_ENTRIES = (2 + MAX_CLAIMS_PER_INTENT + 2 + MAX_FILLS_PER_INTENT + 2 + MAX_INCIDENTS_PER_INTENT) * MAX_INTENTS
+MAX_LEDGER_ENTRIES = (2 + MAX_CLAIMS_PER_INTENT + 2 + MAX_FILLS_PER_INTENT + 2 + MAX_INCIDENTS_PER_INTENT + MAX_EVIDENCE_PER_INTENT + MAX_RESOLUTIONS_PER_INTENT) * MAX_INTENTS
 MAX_RECORD_BYTES = 4096
 MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_WAL_BYTES = 4 * 1024 * 1024
@@ -64,6 +66,13 @@ REQUIRED_TRIGGERS.update({
     "cancels_no_delete": "CREATE TRIGGER cancels_no_delete BEFORE DELETE ON cancels BEGIN SELECT RAISE(ABORT, 'immutable cancel'); END",
     "incidents_no_update": "CREATE TRIGGER incidents_no_update BEFORE UPDATE ON incidents BEGIN SELECT RAISE(ABORT, 'immutable incident'); END",
     "incidents_no_delete": "CREATE TRIGGER incidents_no_delete BEFORE DELETE ON incidents BEGIN SELECT RAISE(ABORT, 'immutable incident'); END",
+})
+V3_TRIGGERS = REQUIRED_TRIGGERS.copy()
+REQUIRED_TRIGGERS.update({
+    "evidence_no_update": "CREATE TRIGGER evidence_no_update BEFORE UPDATE ON evidence BEGIN SELECT RAISE(ABORT, 'immutable evidence'); END",
+    "evidence_no_delete": "CREATE TRIGGER evidence_no_delete BEFORE DELETE ON evidence BEGIN SELECT RAISE(ABORT, 'immutable evidence'); END",
+    "resolutions_no_update": "CREATE TRIGGER resolutions_no_update BEFORE UPDATE ON resolutions BEGIN SELECT RAISE(ABORT, 'immutable resolution'); END",
+    "resolutions_no_delete": "CREATE TRIGGER resolutions_no_delete BEFORE DELETE ON resolutions BEGIN SELECT RAISE(ABORT, 'immutable resolution'); END",
 })
 
 class PaperStorageError(RuntimeError):
@@ -284,6 +293,113 @@ def _fill_transition(state, intent, event):
                                  "FILLED" if remaining == 0 else "PARTIALLY_FILLED")
         return next_state
 
+def _journal_record(record):
+    if type(record) is not dict or len(_json(record).encode("ascii")) > MAX_RECORD_BYTES:
+        raise ValueError("Bounded synthetic private journal record required")
+    common = {"evidence_id", "intent_id", "source_kind", "source_identity", "source_sequence", "kind"}
+    execution = {"source_execution_id", "execution_ts", "delta_qty_btc", "price_usdt_per_btc", "fee_usdt", "observed_fill_ids"}
+    seal = {"coverage_until", "execution_evidence_ids"}
+    if record.get("kind") == "EXECUTION" and set(record) == common | execution:
+        _identity(record["source_execution_id"]); _time(record["execution_ts"])
+        for field in ("delta_qty_btc", "price_usdt_per_btc", "fee_usdt"):
+            if _amount(record[field], positive=field != "fee_usdt") != record[field]:
+                raise ValueError("Evidence decimals must be canonical")
+        aliases = record["observed_fill_ids"]
+        if type(aliases) is not list or not 1 <= len(aliases) <= 4 or len(set(aliases)) != len(aliases):
+            raise ValueError("Invalid observed-fill aliases")
+        for alias in aliases: _identity(alias)
+    elif record.get("kind") == "FINAL_COMPLETE" and set(record) == common | seal:
+        _time(record["coverage_until"])
+        ids = record["execution_evidence_ids"]
+        if type(ids) is not list or len(ids) > MAX_EVIDENCE_PER_INTENT or len(ids) != len(set(ids)):
+            raise ValueError("Invalid complete execution set")
+        for eid in ids: _identity(eid)
+    else:
+        raise ValueError("Invalid journal record fields")
+    _identity(record["evidence_id"]); _identity(record["intent_id"]); _identity(record["source_identity"])
+    if record["source_kind"] != "synthetic_private_paper_journal" or type(record["source_sequence"]) is not int or not 1 <= record["source_sequence"] <= MAX_EVIDENCE_PER_INTENT:
+        raise ValueError("Synthetic source and bounded sequence required")
+    validate_json(record, "paper_execution_evidence.schema.json", SCHEMAS)
+    return record
+
+def _resolution_request(request):
+    keys = {"reconciliation_id", "fill_id", "incident_hash", "evidence_id", "evidence_sha256", "expected_head_hash", "decision"}
+    if type(request) is not dict or set(request) != keys or len(_json(request).encode("ascii")) > MAX_RECORD_BYTES:
+        raise ValueError("Bounded explicit reconciliation required")
+    for key in ("reconciliation_id", "fill_id", "evidence_id"):
+        _identity(request[key])
+    for key in ("incident_hash", "evidence_sha256", "expected_head_hash"):
+        if type(request[key]) is not str or not re.fullmatch(r"[0-9a-f]{64}", request[key]):
+            raise ValueError("Invalid immutable SHA-256 reference")
+    if request["decision"] not in ("VERIFIED_EXECUTION", "VERIFIED_NONEXECUTION", "VERIFIED_DUPLICATE"):
+        raise ValueError("Unsupported reconciliation decision")
+    validate_json(request, "paper_incident_resolution.schema.json", SCHEMAS)
+    return request
+
+def _verified_recovery_record(record, validator):
+    try:
+        return validator(record)
+    except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+        raise PaperStorageError("Invalid journal or incident resolution registration") from exc
+
+def _prove_resolution(request, incident, evidence, all_evidence, applied):
+    """Structural proof only; a self-authored synthetic journal is not authenticated."""
+    event = incident["event"]
+    iid = event["intent_id"]
+    if evidence["intent_id"] != iid:
+        raise ReconciliationRequired("Evidence belongs to another intent")
+    aliases = [e for e in all_evidence.values() if e["intent_id"] == iid and
+               e["kind"] == "EXECUTION" and event["fill_id"] in e["observed_fill_ids"]]
+    if request["decision"] == "VERIFIED_NONEXECUTION":
+        if (evidence["kind"] != "FINAL_COMPLETE" or
+            _time(evidence["coverage_until"]) < _time(event["fill_ts"]) or aliases or
+            set(evidence["execution_evidence_ids"]) != {
+                key for key, e in all_evidence.items() if e["intent_id"] == iid and e["kind"] == "EXECUTION"}):
+            raise ReconciliationRequired("No complete negative execution coverage")
+        # A final journal that omits a previously applied execution cannot
+        # establish a closed world for this intent, even if the incident's
+        # particular alias is absent. Include prior verified corrections too.
+        matched_executions = set()
+        for fid, prior in applied.items():
+            if prior["intent_id"] != iid or _time(prior["fill_ts"]) > _time(evidence["coverage_until"]):
+                continue
+            matches = [source for eid, source in all_evidence.items()
+                       if eid in evidence["execution_evidence_ids"] and
+                       fid in source["observed_fill_ids"] and
+                       (source["execution_ts"], source["delta_qty_btc"],
+                        source["price_usdt_per_btc"], source["fee_usdt"]) ==
+                       (prior["fill_ts"], prior["delta_qty_btc"],
+                        prior["price_usdt_per_btc"], prior["fee_usdt"])]
+            if len(matches) != 1 or matches[0]["source_execution_id"] in matched_executions:
+                raise ReconciliationRequired("Final journal contradicts or duplicates an applied execution")
+            matched_executions.add(matches[0]["source_execution_id"])
+        return
+    if (evidence["kind"] != "EXECUTION" or evidence not in aliases or
+        any(e != evidence for e in aliases) or
+        (evidence["execution_ts"], evidence["delta_qty_btc"], evidence["price_usdt_per_btc"], evidence["fee_usdt"]) !=
+        (event["fill_ts"], event["delta_qty_btc"], event["price_usdt_per_btc"], event["fee_usdt"])):
+        raise ReconciliationRequired("Execution record does not uniquely match original observation")
+    if request["decision"] == "VERIFIED_DUPLICATE":
+        others = [fid for fid in evidence["observed_fill_ids"] if fid != event["fill_id"] and fid in applied and
+                  applied[fid]["intent_id"] == iid and
+                  (applied[fid]["fill_ts"], applied[fid]["delta_qty_btc"], applied[fid]["price_usdt_per_btc"], applied[fid]["fee_usdt"]) ==
+                  (event["fill_ts"], event["delta_qty_btc"], event["price_usdt_per_btc"], event["fee_usdt"])]
+        if len(others) != 1:
+            raise ReconciliationRequired("No distinct applied fill under shared source execution ID")
+    elif any(fid != event["fill_id"] and fid in applied for fid in evidence["observed_fill_ids"]):
+        raise ReconciliationRequired("Execution already applied under another fill ID")
+
+def _accounting_delta(before, after):
+    with localcontext() as ctx:
+        ctx.prec = 50
+        return {
+            "cash_delta_usdt": _decimal_text(Decimal(before["spent_usdt"]) - Decimal(after["spent_usdt"])),
+            "base_delta_btc": _decimal_text(Decimal(after["filled_qty_btc"]) - Decimal(before["filled_qty_btc"])),
+            "cash_reserve_delta_usdt": _decimal_text(Decimal(after["cash_reserved_usdt"]) - Decimal(before["cash_reserved_usdt"])),
+            "risk_reserve_delta_usdt": _decimal_text(Decimal(after["risk_reserved_usdt"]) - Decimal(before["risk_reserved_usdt"])),
+            "risk_exposure_delta_usdt": _decimal_text(Decimal(after["filled_risk_exposure_usdt"]) - Decimal(before["filled_risk_exposure_usdt"])),
+        }
+
 
 class PaperLedger:
     def __init__(self, path, *, initial=None, allow_legacy=False):
@@ -338,7 +454,7 @@ class PaperLedger:
 
     @classmethod
     def migrate_v1(cls, path):
-        """Explicit atomic v1-to-v3 migration; never alter an unverified DB."""
+        """Explicit atomic v1-to-v4 migration; never alter an unverified DB."""
         store = cls(path, allow_legacy=True)
         try:
             if store._meta()[0] != 1:
@@ -347,11 +463,12 @@ class PaperLedger:
                 store._verify_recovery_snapshot()
                 store._install_dispatch_tables()
                 store._install_execution_tables()
+                store._install_reconciliation_tables()
                 for name, sql in REQUIRED_TRIGGERS.items():
                     if name not in LEGACY_TRIGGERS:
                         store._conn.execute(sql)
                 store._backfill_execution()
-                store._conn.execute("UPDATE meta SET schema_version=3 WHERE id=1")
+                store._conn.execute("UPDATE meta SET schema_version=4 WHERE id=1")
             store._transaction(migrate)
         finally:
             store.close()
@@ -359,7 +476,7 @@ class PaperLedger:
 
     @classmethod
     def migrate_v2(cls, path):
-        """Explicit verified v2-to-v3 migration preserving claims and receipts."""
+        """Explicit verified v2-to-v4 migration preserving claims and receipts."""
         store = cls(path, allow_legacy=True)
         try:
             if store._meta()[0] != 2:
@@ -367,11 +484,30 @@ class PaperLedger:
             def migrate():
                 store._verify_recovery_snapshot()
                 store._install_execution_tables()
+                store._install_reconciliation_tables()
                 for name, sql in REQUIRED_TRIGGERS.items():
                     if name not in V2_TRIGGERS:
                         store._conn.execute(sql)
                 store._backfill_execution()
-                store._conn.execute("UPDATE meta SET schema_version=3 WHERE id=1")
+                store._conn.execute("UPDATE meta SET schema_version=4 WHERE id=1")
+            store._transaction(migrate)
+        finally:
+            store.close()
+        return cls.open(path)
+
+    @classmethod
+    def migrate_v3(cls, path):
+        """Explicit verified and atomic v3-to-v4 preservation migration."""
+        store = cls(path, allow_legacy=True)
+        try:
+            if store._meta()[0] != 3:
+                raise PaperStorageError("Only verified schema v3 can be migrated")
+            def migrate():
+                store._verify_recovery_snapshot()
+                store._install_reconciliation_tables()
+                for name in REQUIRED_TRIGGERS.keys() - V3_TRIGGERS.keys():
+                    store._conn.execute(REQUIRED_TRIGGERS[name])
+                store._conn.execute("UPDATE meta SET schema_version=4 WHERE id=1")
             store._transaction(migrate)
         finally:
             store.close()
@@ -410,9 +546,10 @@ class PaperLedger:
         """)
         self._install_dispatch_tables()
         self._install_execution_tables()
+        self._install_reconciliation_tables()
         for sql in REQUIRED_TRIGGERS.values():
             self._conn.execute(sql)
-        self._conn.execute("INSERT INTO meta VALUES(1,3,?,?, '0','0',0,0,NULL,NULL)", (cash, risk))
+        self._conn.execute("INSERT INTO meta VALUES(1,4,?,?, '0','0',0,0,NULL,NULL)", (cash, risk))
         self._conn.execute("INSERT INTO execution_meta VALUES(1,?, '0', '0')", (cash,))
         self._conn.commit()
 
@@ -446,10 +583,18 @@ class PaperLedger:
             self._conn.execute("INSERT INTO execution VALUES(?,?)",
                                (iid, _json(_initial_execution_state(json.loads(text)))))
 
+    def _install_reconciliation_tables(self):
+        self._conn.execute("CREATE TABLE evidence (evidence_id TEXT PRIMARY KEY,"
+            "intent_id TEXT NOT NULL REFERENCES intents(intent_id), payload TEXT NOT NULL,"
+            "byte_length INTEGER NOT NULL, sha256 TEXT NOT NULL)")
+        self._conn.execute("CREATE TABLE resolutions (reconciliation_id TEXT PRIMARY KEY,"
+            "fill_id TEXT NOT NULL UNIQUE REFERENCES incidents(fill_id), request TEXT NOT NULL,"
+            "result TEXT NOT NULL)")
+
     def _meta(self):
         row = self._conn.execute("SELECT schema_version,initial_cash,risk_budget,cash_reserved,"
             "risk_reserved,portfolio_version,writer_epoch,writer_id,last_hash FROM meta WHERE id=1").fetchone()
-        if row is None or row[0] not in (1, 2, 3):
+        if row is None or row[0] not in (1, 2, 3, 4):
             raise PaperStorageError("Missing or unsupported paper ledger metadata")
         return row
 
@@ -470,7 +615,7 @@ class PaperLedger:
         actual_triggers = dict(self._conn.execute(
             "SELECT name,sql FROM sqlite_master WHERE type='trigger'"))
         schema = self._meta()[0]
-        expected = LEGACY_TRIGGERS if schema == 1 else (V2_TRIGGERS if schema == 2 else REQUIRED_TRIGGERS)
+        expected = LEGACY_TRIGGERS if schema == 1 else (V2_TRIGGERS if schema == 2 else V3_TRIGGERS if schema == 3 else REQUIRED_TRIGGERS)
         if actual_triggers != expected:
             raise PaperStorageError("Missing or altered append-only trigger")
 
@@ -483,7 +628,7 @@ class PaperLedger:
                                   (MAX_LEDGER_ENTRIES + 1,)).fetchall()
         if schema == 1 and len(rows) != 2 * version:
             raise PaperStorageError("Ledger entry count does not match portfolio version")
-        if schema in (2, 3) and (len(rows) < 2 * version or len(rows) > MAX_LEDGER_ENTRIES):
+        if schema in (2, 3, 4) and (len(rows) < 2 * version or len(rows) > MAX_LEDGER_ENTRIES):
             raise PaperStorageError("Ledger entry count exceeds dispatch bound")
         previous = None
         created = {}
@@ -494,7 +639,15 @@ class PaperLedger:
         execution_events = {}
         seen_incident = False
         incident_barrier = False
-        for text,digest,prev in rows:
+        evidence_history = {}
+        evidence_positions = {}
+        resolutions_history = {}
+        incident_hashes = {}
+        incident_positions = {}
+        incident_intents = {}
+        resolved_intents = set()
+        closed_barrier = False
+        for position, (text,digest,prev) in enumerate(rows):
             if len(text.encode("utf-8")) > MAX_RECORD_BYTES or prev != previous:
                 raise PaperStorageError("Ledger chain or record bound failed")
             item = json.loads(text)
@@ -502,9 +655,77 @@ class PaperLedger:
                 raise PaperStorageError("Ledger hash mismatch")
             validate_json(item, "ledger_entry.schema.json", SCHEMAS)
             iid = item["intent_id"]
-            if incident_barrier and item["entry_type"] in ("risk_reserved", "paper_fill", "cancelled"):
+            if (incident_barrier or closed_barrier) and item["entry_type"] in ("risk_reserved", "paper_fill", "cancelled"):
                 raise PaperStorageError("Risk, fill or cancellation release after unresolved incident")
-            if item["entry_type"] == "intent_created" and iid not in created:
+            if schema == 4 and item["entry_type"] == "evidence_registered":
+                record = item.get("evidence")
+                if (iid not in created or not isinstance(record, dict) or
+                    record.get("intent_id") != iid or _verified_recovery_record(record, _journal_record) != record or
+                    set(item) != {"ledger_id", "ts", "entry_type", "symbol", "config_version",
+                                  "intent_id", "amounts", "evidence", "evidence_sha256",
+                                  "evidence_byte_length", "prev_hash", "hash"} or
+                    item["ledger_id"] != "led_" + iid + "_evidence_" + record["evidence_id"] or
+                    item["ts"] != created[iid]["created_ts"] or
+                    item["config_version"] != created[iid]["config_version"] or item["amounts"] != {} or
+                    item.get("evidence_byte_length") != len(_json(record).encode("ascii")) or
+                    item.get("evidence_sha256") != hashlib.sha256(_json(record).encode("ascii")).hexdigest()):
+                    raise PaperStorageError("Invalid journal registration")
+                eid = record["evidence_id"]
+                prior_source = [e for e in evidence_history.values() if e["intent_id"] == iid]
+                if eid in evidence_history or len(prior_source) >= MAX_EVIDENCE_PER_INTENT:
+                    raise PaperStorageError("Reused or excessive evidence ID")
+                if (record["source_sequence"] != len(prior_source) + 1 or
+                    any(e["source_identity"] != record["source_identity"] for e in prior_source)):
+                    raise PaperStorageError("Incomplete or mixed journal source sequence")
+                if iid in resolved_intents:
+                    raise PaperStorageError("Journal registration after intent resolution")
+                if any(e["intent_id"] == iid and (e["kind"] == "FINAL_COMPLETE" or
+                       (e["source_identity"] == record["source_identity"] and
+                        e["source_sequence"] >= record["source_sequence"]) or
+                       (e["kind"] == record["kind"] == "EXECUTION" and
+                        (e["source_execution_id"] == record["source_execution_id"] or
+                         not set(e["observed_fill_ids"]).isdisjoint(record["observed_fill_ids"])))) for e in evidence_history.values()):
+                    raise PaperStorageError("Sealed or conflicting journal stream")
+                if (record["kind"] == "EXECUTION" and any(
+                    e["kind"] == "EXECUTION" and
+                    e["source_identity"] == record["source_identity"] and
+                    e["source_execution_id"] == record["source_execution_id"]
+                    for e in evidence_history.values())):
+                    raise PaperStorageError("Reused global source execution identity")
+                if record["kind"] == "FINAL_COMPLETE":
+                    earlier = [e for e in evidence_history.values() if e["intent_id"] == iid and e["kind"] == "EXECUTION"]
+                    if (set(record["execution_evidence_ids"]) != {e["evidence_id"] for e in earlier} or
+                        any(e["source_identity"] != record["source_identity"] or
+                            _time(e["execution_ts"]) > _time(record["coverage_until"]) for e in earlier)):
+                        raise PaperStorageError("Incomplete or contradictory journal seal")
+                evidence_history[eid] = record
+                evidence_positions[eid] = position
+            elif schema == 4 and item["entry_type"] == "incident_resolved":
+                detail = item.get("resolution")
+                if (not isinstance(detail, dict) or set(detail) != {"request", "result", "state_after"} or
+                    not isinstance(detail["request"], dict) or
+                    _verified_recovery_record(detail["request"], _resolution_request) != detail["request"]):
+                    raise PaperStorageError("Invalid incident resolution entry")
+                req = detail["request"]; fid = req["fill_id"]
+                if (set(item) != {"ledger_id", "ts", "entry_type", "symbol", "config_version",
+                                  "intent_id", "amounts", "resolution", "prev_hash", "hash"} or
+                    iid not in created or item["ledger_id"] != "led_" + iid + "_incident_resolved_" + req["reconciliation_id"] or
+                    item["ts"] != created[iid]["created_ts"] or
+                    item["config_version"] != created[iid]["config_version"] or
+                    fid not in incident_hashes or incident_hashes[fid] != req["incident_hash"] or
+                    req["evidence_id"] not in evidence_history or
+                    evidence_positions.get(req["evidence_id"], position) >= incident_positions.get(fid, -1) or
+                    req["evidence_sha256"] != hashlib.sha256(
+                        _json(evidence_history[req["evidence_id"]]).encode("ascii")).hexdigest() or
+                    req["reconciliation_id"] in resolutions_history or
+                    fid in (r["request"]["fill_id"] for r in resolutions_history.values()) or
+                    req["expected_head_hash"] != prev or iid != incident_intents.get(fid)):
+                    raise PaperStorageError("Incident reference, evidence order or revision differs")
+                resolutions_history[req["reconciliation_id"]] = detail
+                execution_events.setdefault(iid, []).append(("incident_resolved", detail))
+                resolved_intents.add(iid)
+                closed_barrier = True
+            elif item["entry_type"] == "intent_created" and iid not in created:
                 created[iid] = item["intent"]
             elif item["entry_type"] == "risk_reserved" and iid in created and iid not in reserved:
                 reserved[iid] = item["amounts"]
@@ -531,7 +752,7 @@ class PaperLedger:
                     or item["ts"] != ack.get("acked_at")):
                     raise PaperStorageError("Invalid acceptance ACK ledger event")
                 acks[iid] = ack
-            elif (schema == 3 and item["entry_type"] in
+            elif (schema >= 3 and item["entry_type"] in
                   ("paper_fill", "cancel_requested", "cancelled", "reconcile") and iid in receipts):
                 detail = item.get("execution")
                 if (not isinstance(detail, dict) or not isinstance(detail.get("event"), dict)
@@ -549,6 +770,9 @@ class PaperLedger:
                     raise PaperStorageError("Invalid execution ledger event")
                 execution_events.setdefault(iid, []).append((item["entry_type"], detail))
                 if item["entry_type"] == "reconcile":
+                    incident_hashes[detail["event"]["fill_id"]] = digest
+                    incident_positions[detail["event"]["fill_id"]] = position
+                    incident_intents[detail["event"]["fill_id"]] = iid
                     seen_incident = True
                     if "reason" in detail:
                         incident_barrier = True
@@ -578,17 +802,21 @@ class PaperLedger:
                         reserved[iid]["risk_reserved_usdt"]) or out != (intent_json, "PENDING_SEND"):
                     raise PaperStorageError("Reservation or pending outbox differs from ledger")
                 observed_cash += Decimal(row[0]); observed_risk += Decimal(row[1])
-            if schema != 3 and (observed_cash != Decimal(cash_total) or observed_risk != Decimal(risk_total)
+            if schema < 3 and (observed_cash != Decimal(cash_total) or observed_risk != Decimal(risk_total)
                 or observed_cash > Decimal(cash) or observed_risk > Decimal(budget)):
                 raise PaperStorageError("Reserved budgets differ from ledger")
         if schema >= 2:
-            execution_count = sum(map(len, execution_events.values()))
+            execution_count = sum(map(len, execution_events.values())) + len(evidence_history)
             self._verify_dispatch_state(version, created, claims, receipts, acks, len(rows) - execution_count)
-        if schema == 3:
+        if schema in (3, 4):
             self._verify_execution_state(created, receipts, execution_events, cash, budget,
-                                         cash_total, risk_total, rows)
+                                         cash_total, risk_total, rows, evidence_history, resolutions_history)
+            if schema == 4:
+                self._verify_reconciliation_tables(evidence_history, resolutions_history)
         elif not self._allow_legacy:
             raise PaperStorageError("Schema v1/v2 requires explicit PaperLedger.migrate_v1/v2(path)")
+        if schema == 3 and not self._allow_legacy:
+            raise PaperStorageError("Schema v3 requires explicit PaperLedger.migrate_v3(path)")
 
     def _verify_dispatch_state(self, version, created, claims, receipts, acks, entry_count):
         total_claims = sum(map(len, claims.values()))
@@ -640,7 +868,7 @@ class PaperLedger:
                 raise PaperStorageError("ACK differs from acceptance ledger")
 
     def _verify_execution_state(self, created, receipts, events, cash, budget,
-                                cash_total, risk_total, ledger_rows):
+                                cash_total, risk_total, ledger_rows, evidence_history, resolutions_history):
         expected_fills = {}; expected_cancels = {}; expected_incidents = {}; expected_states = {}
         with localcontext() as ctx:
             ctx.prec = 50
@@ -650,9 +878,10 @@ class PaperLedger:
                 requested = None
                 latest_fill = None
                 fill_count = incident_count = 0
+                resolved_applied = {}
                 for kind, detail in events.get(iid, []):
-                    event = detail["event"]
                     try:
+                        event = detail.get("event")
                         if kind in ("paper_fill", "reconcile"):
                             if _observed_fill(event) != event or (kind == "paper_fill" and
                                 _time(event["fill_ts"]) < _time(receipts[iid]["accepted_at"])):
@@ -721,6 +950,28 @@ class PaperLedger:
                                      "remaining_qty_btc": "0", "cash_reserved_usdt": "0", "risk_reserved_usdt": "0"}
                             result = {"status": state["status"], "intent_id": iid, "cancel_id": event["cancel_id"]}
                             expected_cancels[(iid, "confirmed")] = _json({"event": event, "result": result})
+                        elif kind == "incident_resolved":
+                            request = detail["request"]
+                            fid = request["fill_id"]
+                            if fid not in expected_incidents or request["evidence_id"] not in evidence_history:
+                                raise ValueError("Resolution precedes original incident/evidence")
+                            incident = json.loads(expected_incidents[fid][1])
+                            applied = {key: json.loads(value[1])["event"] for key, value in expected_fills.items()}
+                            applied.update(resolved_applied)
+                            _prove_resolution(request, incident, evidence_history[request["evidence_id"]],
+                                              evidence_history, applied)
+                            if request["decision"] == "VERIFIED_EXECUTION":
+                                if (_time(incident["event"]["fill_ts"]) < _time(receipts[iid]["accepted_at"]) or
+                                    fill_count >= MAX_FILLS_PER_INTENT):
+                                    raise ValueError("Unsupported incident correction")
+                                state = _fill_transition(state, intent, incident["event"])
+                                fill_count += 1
+                                resolved_applied[fid] = incident["event"]
+                                latest_fill = max(latest_fill, _time(incident["event"]["fill_ts"])) if latest_fill else _time(incident["event"]["fill_ts"])
+                            result = {"status": request["decision"], "fill_id": fid,
+                                      "intent_id": iid, "reconciliation_id": request["reconciliation_id"]}
+                            if detail["result"] != result:
+                                raise ValueError("Resolution result differs")
                         else:
                             raise ValueError("Unknown execution event")
                         if detail["state_after"] != state:
@@ -744,8 +995,8 @@ class PaperLedger:
                     raise PaperStorageError("Execution inventory/risk conservation failed")
             actual_cash = Decimal(cash) - spent
             if (reserved_cash != Decimal(cash_total) or reserved_risk != Decimal(risk_total) or
-                actual_cash < 0 or base < 0 or reserved_cash > actual_cash or
-                reserved_risk + filled_risk > Decimal(budget)):
+                base < 0 or (not resolutions_history and
+                (actual_cash < 0 or reserved_cash > actual_cash or reserved_risk + filled_risk > Decimal(budget)))):
                 raise PaperStorageError("Execution cash/base/reservation totals differ")
             if self._conn.execute("SELECT count(*) FROM execution_meta").fetchone()[0] != 1 or \
                self._execution_meta() != (_decimal_text(actual_cash), _decimal_text(base), _decimal_text(filled_risk)):
@@ -768,6 +1019,26 @@ class PaperLedger:
         self._verify_execution_accounting_order(ledger_rows, created, expected_states, cash,
                                                 budget, cash_total, risk_total)
 
+    def _verify_reconciliation_tables(self, evidence_history, resolutions_history):
+        evidence_rows = self._conn.execute("SELECT evidence_id,intent_id,payload,byte_length,sha256 FROM evidence LIMIT ?",
+                         (MAX_INTENTS * MAX_EVIDENCE_PER_INTENT + 1,)).fetchall()
+        if len(evidence_rows) != len(evidence_history):
+            raise PaperStorageError("Evidence count differs from ledger")
+        for eid, iid, text, length, digest in evidence_rows:
+            record = evidence_history.get(eid)
+            if record is None or iid != record["intent_id"] or text != _json(record) or \
+               length != len(text.encode("ascii")) or digest != hashlib.sha256(text.encode("ascii")).hexdigest():
+                raise PaperStorageError("Immutable evidence bytes/digest differ from ledger")
+        rows = self._conn.execute("SELECT reconciliation_id,fill_id,request,result FROM resolutions LIMIT ?",
+                                  (MAX_INTENTS * MAX_RESOLUTIONS_PER_INTENT + 1,)).fetchall()
+        if len(rows) != len(resolutions_history):
+            raise PaperStorageError("Resolution count differs from ledger")
+        for rid, fid, request, result in rows:
+            expected = resolutions_history.get(rid)
+            if expected is None or fid != expected["request"]["fill_id"] or \
+               request != _json(expected["request"]) or result != _json(expected["result"]):
+                raise PaperStorageError("Resolution materialization differs from ledger")
+
     def _verify_execution_accounting_order(self, rows, created, expected_states,
                                            cash, budget, cash_total, risk_total):
         """Recheck cost incidents against the portfolio at their ledger position."""
@@ -777,13 +1048,14 @@ class PaperLedger:
             reserved_cash = reserved_risk = filled_risk = Decimal(0)
             states = {}
 
-            def candidate(before, after):
+            def candidate(before, after, *, verified=False):
                 next_cash = actual - (Decimal(after["spent_usdt"]) - Decimal(before["spent_usdt"]))
                 next_reserved_cash = reserved_cash + Decimal(after["cash_reserved_usdt"]) - Decimal(before["cash_reserved_usdt"])
                 next_reserved_risk = reserved_risk + Decimal(after["risk_reserved_usdt"]) - Decimal(before["risk_reserved_usdt"])
                 next_filled_risk = filled_risk + Decimal(after["filled_risk_exposure_usdt"]) - Decimal(before["filled_risk_exposure_usdt"])
-                if (min(next_cash, next_reserved_cash, next_reserved_risk, next_filled_risk) < 0 or
-                    next_reserved_cash > next_cash or next_reserved_risk + next_filled_risk > Decimal(budget)):
+                if (min(next_reserved_cash, next_reserved_risk, next_filled_risk) < 0 or
+                    (not verified and (next_cash < 0 or next_reserved_cash > next_cash or
+                                       next_reserved_risk + next_filled_risk > Decimal(budget)))):
                     raise BudgetExceeded("Execution accounting limit")
                 return next_cash, next_reserved_cash, next_reserved_risk, next_filled_risk
 
@@ -800,10 +1072,10 @@ class PaperLedger:
                     reserved_risk += Decimal(state["risk_reserved_usdt"])
                     if reserved_cash > actual or reserved_risk + filled_risk > Decimal(budget):
                         raise PaperStorageError("Execution reservation chronology differs")
-                elif kind in ("paper_fill", "cancel_requested", "cancelled", "reconcile"):
+                elif kind in ("paper_fill", "cancel_requested", "cancelled", "reconcile", "incident_resolved"):
                     if iid not in states:
                         raise PaperStorageError("Execution precedes reservation")
-                    detail = item["execution"]
+                    detail = item["resolution"] if kind == "incident_resolved" else item["execution"]
                     before = states[iid]
                     if kind == "reconcile":
                         if detail.get("reason") == "accounting_limit":
@@ -816,8 +1088,13 @@ class PaperLedger:
                                 raise PaperStorageError("Accounting incident had no limit violation")
                         continue
                     after = detail["state_after"]
+                    if kind == "incident_resolved" and item["amounts"] != _accounting_delta(before, after):
+                        raise PaperStorageError("Resolution accounting delta differs")
                     try:
-                        actual, reserved_cash, reserved_risk, filled_risk = candidate(before, after)
+                        # A non-economic closure after a verified deficit carries zero
+                        # delta. It must not be rejected for the prior shortfall.
+                        actual, reserved_cash, reserved_risk, filled_risk = candidate(
+                            before, after, verified=kind == "incident_resolved")
                     except BudgetExceeded as exc:
                         raise PaperStorageError("Applied execution violates accounting chronology") from exc
                     states[iid] = after
@@ -971,11 +1248,14 @@ class PaperLedger:
             with localcontext() as ctx:
                 ctx.prec = 50
                 available = _decimal_text(Decimal(actual_cash) - Decimal(cash_total))
+                cash_deficit = _decimal_text(max(Decimal(0), Decimal(cash_total) - Decimal(actual_cash)))
+                risk_deficit = _decimal_text(max(Decimal(0), Decimal(risk_total) + Decimal(risk_filled) - Decimal(budget)))
             return {"initial_cash_usdt": cash, "risk_budget_usdt": budget,
                     "cash_reserved_usdt": cash_total, "risk_reserved_usdt": risk_total,
                     "cash_actual_usdt": actual_cash, "base_actual_btc": actual_base,
                     "filled_risk_exposure_usdt": risk_filled,
                     "cash_available_usdt": available,
+                    "cash_deficit_usdt": cash_deficit, "risk_deficit_usdt": risk_deficit,
                     "portfolio_version": version, "writer_epoch": epoch, "writer_id": writer}
         return self._transaction(read)
 
@@ -1179,7 +1459,7 @@ class PaperLedger:
             raise ClaimUnavailable("Unknown committed paper intent")
         return json.loads(row[0]), json.loads(row[1])
 
-    def _update_execution(self, intent_id, before, after):
+    def _update_execution(self, intent_id, before, after, *, verified=False):
         cash, base, risk_filled = self._execution_meta()
         _, _, budget, cash_reserved, risk_reserved, _, _, _, _ = self._meta()
         with localcontext() as ctx:
@@ -1189,8 +1469,9 @@ class PaperLedger:
             reserve_next = Decimal(cash_reserved) + Decimal(after["cash_reserved_usdt"]) - Decimal(before["cash_reserved_usdt"])
             risk_next = Decimal(risk_reserved) + Decimal(after["risk_reserved_usdt"]) - Decimal(before["risk_reserved_usdt"])
             exposure_next = Decimal(risk_filled) + Decimal(after["filled_risk_exposure_usdt"]) - Decimal(before["filled_risk_exposure_usdt"])
-            if (cash_next < 0 or base_next < 0 or reserve_next < 0 or risk_next < 0 or
-                exposure_next < 0 or reserve_next > cash_next or risk_next + exposure_next > Decimal(budget)):
+            if (base_next < 0 or reserve_next < 0 or risk_next < 0 or exposure_next < 0 or
+                (not verified and (cash_next < 0 or reserve_next > cash_next or
+                                   risk_next + exposure_next > Decimal(budget)))):
                 raise BudgetExceeded("Observed fill violates cash/base/risk conservation")
         self._conn.execute("UPDATE execution SET state=? WHERE intent_id=?", (_json(after), intent_id))
         self._conn.execute("UPDATE execution_meta SET cash_actual=?,base_actual=?,risk_filled=? WHERE id=1",
@@ -1378,5 +1659,175 @@ class PaperLedger:
     def pending_incidents(self, *, writer_id, writer_epoch):
         def read():
             return [json.loads(row[0]) for row in self._conn.execute(
-                "SELECT payload FROM incidents ORDER BY rowid LIMIT ?", (MAX_INTENTS * MAX_INCIDENTS_PER_INTENT + 1,))]
+                "SELECT payload FROM incidents WHERE NOT EXISTS "
+                "(SELECT 1 FROM resolutions WHERE resolutions.fill_id=incidents.fill_id) "
+                "ORDER BY incidents.rowid LIMIT ?", (MAX_INTENTS * MAX_INCIDENTS_PER_INTENT + 1,))]
         return self._fenced_read(read, writer_id=writer_id, writer_epoch=writer_epoch)
+
+    def _append_incident_resolution(self, *, intent, request, result, before, state, previous):
+        entry = {"ledger_id": "led_" + intent["intent_id"] + "_incident_resolved_" + request["reconciliation_id"],
+                 "ts": intent["created_ts"], "entry_type": "incident_resolved", "symbol": "BTCUSDT",
+                 "config_version": intent["config_version"], "intent_id": intent["intent_id"],
+                 "amounts": _accounting_delta(before, state),
+                 "resolution": {"request": request, "result": result, "state_after": state}, "prev_hash": previous}
+        entry["hash"] = _digest(entry)
+        validate_json(entry, "ledger_entry.schema.json", SCHEMAS)
+        text = _json(entry)
+        if len(text.encode("ascii")) > MAX_RECORD_BYTES:
+            raise PaperStorageError("Resolution ledger entry exceeds byte bound")
+        self._conn.execute("INSERT INTO ledger(ledger_id,payload,hash,prev_hash) VALUES(?,?,?,?)",
+                           (entry["ledger_id"], text, entry["hash"], previous))
+        self._conn.execute("UPDATE meta SET last_hash=? WHERE id=1", (entry["hash"],))
+
+    def register_execution_evidence(self, record, *, writer_id, writer_epoch):
+        """Register synthetic-only bytes; never infer source authenticity from a digest."""
+        record = _journal_record(record)
+        text = _json(record)
+        length = len(text.encode("ascii"))
+        digest = hashlib.sha256(text.encode("ascii")).hexdigest()
+        def register():
+            prev = self._check_writer(writer_id, writer_epoch)
+            iid = record["intent_id"]
+            state, intent = self._execution_row(iid)
+            old = self._conn.execute("SELECT payload,byte_length,sha256 FROM evidence WHERE evidence_id=?",
+                                     (record["evidence_id"],)).fetchone()
+            if old:
+                if old != (text, length, digest):
+                    raise DuplicateConflict("Conflicting immutable evidence ID")
+                return {"evidence_id": record["evidence_id"], "sha256": digest, "byte_length": length}
+            rows = [json.loads(row[0]) for row in self._conn.execute(
+                "SELECT payload FROM evidence WHERE intent_id=? LIMIT ?", (iid, MAX_EVIDENCE_PER_INTENT + 1))]
+            if len(rows) >= MAX_EVIDENCE_PER_INTENT:
+                raise PaperStorageError("Evidence capacity exhausted")
+            # This synthetic journal sequence is contiguous and scoped to one
+            # intent/source. A seal cannot prove absence across a missing slot.
+            if (record["source_sequence"] != len(rows) + 1 or
+                any(e["source_identity"] != record["source_identity"] for e in rows)):
+                raise ReconciliationRequired("Incomplete or mixed journal source sequence")
+            if any(e["kind"] == "FINAL_COMPLETE" for e in rows):
+                raise ReconciliationRequired("Sealed intent rejects further journal records")
+            if self._conn.execute("SELECT 1 FROM resolutions JOIN incidents USING(fill_id) "
+                                  "WHERE incidents.intent_id=? LIMIT 1", (iid,)).fetchone():
+                raise ReconciliationRequired("Resolved intent rejects further journal records")
+            if any(e["source_identity"] == record["source_identity"] and
+                   e["source_sequence"] >= record["source_sequence"] for e in rows):
+                raise DuplicateConflict("Journal sequence must advance per source")
+            if record["kind"] == "EXECUTION" and any(e["kind"] == "EXECUTION" and
+                (e["source_execution_id"] == record["source_execution_id"] or
+                 not set(e["observed_fill_ids"]).isdisjoint(record["observed_fill_ids"])) for e in rows):
+                raise DuplicateConflict("Source execution identity or observed-fill alias reused")
+            if record["kind"] == "EXECUTION":
+                # Source execution identity is global within a journal source,
+                # not reusable under a second paper intent.
+                for (source_text,) in self._conn.execute(
+                        "SELECT payload FROM evidence LIMIT ?", (MAX_INTENTS * MAX_EVIDENCE_PER_INTENT + 1,)):
+                    source = json.loads(source_text)
+                    if (source["kind"] == "EXECUTION" and
+                        source["source_identity"] == record["source_identity"] and
+                        source["source_execution_id"] == record["source_execution_id"]):
+                        raise DuplicateConflict("Source execution identity reused across intents")
+            if record["kind"] == "FINAL_COMPLETE" and (
+                set(record["execution_evidence_ids"]) != {
+                    e["evidence_id"] for e in rows if e["kind"] == "EXECUTION"} or
+                any(e["source_identity"] != record["source_identity"] or
+                    _time(e["execution_ts"]) > _time(record["coverage_until"])
+                    for e in rows if e["kind"] == "EXECUTION")):
+                raise ReconciliationRequired("Final journal seal has incomplete or contradictory coverage")
+            self._conn.execute("INSERT INTO evidence VALUES(?,?,?,?,?)",
+                               (record["evidence_id"], iid, text, length, digest))
+            entry = {"ledger_id": "led_" + iid + "_evidence_" + record["evidence_id"],
+                     "ts": intent["created_ts"], "entry_type": "evidence_registered",
+                     "symbol": "BTCUSDT", "config_version": intent["config_version"], "intent_id": iid,
+                     "amounts": {}, "evidence": record, "evidence_sha256": digest,
+                     "evidence_byte_length": length, "prev_hash": prev}
+            entry["hash"] = _digest(entry)
+            validate_json(entry, "ledger_entry.schema.json", SCHEMAS)
+            encoded = _json(entry)
+            if len(encoded.encode("ascii")) > MAX_RECORD_BYTES:
+                raise PaperStorageError("Evidence ledger entry exceeds byte bound")
+            self._conn.execute("INSERT INTO ledger(ledger_id,payload,hash,prev_hash) VALUES(?,?,?,?)",
+                               (entry["ledger_id"], encoded, entry["hash"], prev))
+            self._conn.execute("UPDATE meta SET last_hash=? WHERE id=1", (entry["hash"],))
+            return {"evidence_id": record["evidence_id"], "sha256": digest, "byte_length": length}
+        return self._transaction(register)
+
+    def reconcile_incident(self, request, *, writer_id, writer_epoch):
+        """Explicit synthetic-only structural proof; closure never restores readiness."""
+        request = _resolution_request(request)
+        def resolve():
+            prev = self._check_writer(writer_id, writer_epoch)
+            old = self._conn.execute("SELECT request,result FROM resolutions WHERE reconciliation_id=?",
+                                     (request["reconciliation_id"],)).fetchone()
+            if old:
+                if old[0] != _json(request):
+                    raise DuplicateConflict("Conflicting immutable reconciliation ID")
+                return json.loads(old[1])
+            if request["expected_head_hash"] != prev:
+                raise ReconciliationRequired("Stale ledger-head state revision")
+            row = self._conn.execute("SELECT intent_id,payload FROM incidents WHERE fill_id=?",
+                                     (request["fill_id"],)).fetchone()
+            if not row:
+                raise ReconciliationRequired("Unknown original incident")
+            iid, text = row
+            if self._conn.execute("SELECT 1 FROM resolutions WHERE fill_id=?", (request["fill_id"],)).fetchone():
+                raise DuplicateConflict("Incident already resolved under another ID")
+            original = self._conn.execute("SELECT payload FROM ledger WHERE hash=?",
+                                          (request["incident_hash"],)).fetchone()
+            if not original or json.loads(original[0]).get("entry_type") != "reconcile" or \
+               json.loads(original[0]).get("fill_id") != request["fill_id"] or \
+               json.loads(original[0]).get("intent_id") != iid:
+                raise ReconciliationRequired("Original incident hash does not identify this incident")
+            evidence_row = self._conn.execute("SELECT payload,sha256,byte_length FROM evidence WHERE evidence_id=?",
+                                             (request["evidence_id"],)).fetchone()
+            if not evidence_row or evidence_row[1] != request["evidence_sha256"]:
+                raise ReconciliationRequired("Missing or mismatched precommitted evidence")
+
+            incident_seq = self._conn.execute("SELECT seq FROM ledger WHERE hash=?", (request["incident_hash"],)).fetchone()[0]
+            committed = [json.loads(p) for seq, p in self._conn.execute(
+                "SELECT seq,payload FROM ledger WHERE seq<? ORDER BY seq", (incident_seq,))]
+            if not any(e["entry_type"] == "evidence_registered" and
+                       e["evidence"]["evidence_id"] == request["evidence_id"] and
+                       e["evidence_sha256"] == evidence_row[1] for e in committed):
+                raise ReconciliationRequired("Evidence was not committed before original incident")
+            evidence = json.loads(evidence_row[0]); original_incident = json.loads(text)
+            all_evidence = {eid: json.loads(payload) for eid, payload in self._conn.execute(
+                "SELECT evidence_id,payload FROM evidence LIMIT ?", (MAX_INTENTS * MAX_EVIDENCE_PER_INTENT + 1,))}
+            applied = {fid: json.loads(payload)["event"] for fid, payload in self._conn.execute(
+                "SELECT fill_id,payload FROM fills LIMIT ?", (MAX_INTENTS * MAX_FILLS_PER_INTENT + 1,))}
+            verified_count = 0
+            for (past_request,) in self._conn.execute(
+                    "SELECT request FROM resolutions LIMIT ?", (MAX_INTENTS * MAX_RESOLUTIONS_PER_INTENT + 1,)):
+                previous = json.loads(past_request)
+                if previous["decision"] == "VERIFIED_EXECUTION":
+                    source = self._conn.execute("SELECT payload FROM incidents WHERE fill_id=?",
+                                                (previous["fill_id"],)).fetchone()
+                    if source is None:
+                        raise PaperStorageError("Verified execution lost its original incident")
+                    prior_event = json.loads(source[0])["event"]
+                    applied[previous["fill_id"]] = prior_event
+                    if prior_event["intent_id"] == iid:
+                        verified_count += 1
+            _prove_resolution(request, original_incident, evidence, all_evidence, applied)
+            state, intent = self._execution_row(iid)
+            if request["decision"] == "VERIFIED_EXECUTION":
+                event = original_incident["event"]
+                receipt = json.loads(self._conn.execute("SELECT receipt FROM receipts WHERE intent_id=?", (iid,)).fetchone()[0])
+                if (_time(event["fill_ts"]) < _time(receipt["accepted_at"]) or
+                    state["status"] not in ("OPEN", "PARTIALLY_FILLED", "CANCEL_PENDING") or
+                    verified_count + self._conn.execute("SELECT count(*) FROM fills WHERE intent_id=?", (iid,)).fetchone()[0] >= MAX_FILLS_PER_INTENT):
+                    raise ReconciliationRequired("Unsupported terminal, early or full fill correction")
+                try:
+                    after = _fill_transition(state, intent, event)
+                except (DuplicateConflict, ReconciliationRequired) as exc:
+                    raise ReconciliationRequired("Unsupported quantity or cumulative correction") from exc
+                self._update_execution(iid, state, after, verified=True)
+            else:
+                after = state
+            result = {"status": request["decision"], "fill_id": request["fill_id"],
+                      "intent_id": iid, "reconciliation_id": request["reconciliation_id"]}
+            self._conn.execute("INSERT INTO resolutions VALUES(?,?,?,?)",
+                               (request["reconciliation_id"], request["fill_id"], _json(request), _json(result)))
+            self._append_incident_resolution(intent=intent, request=request, result=result,
+                                             before=state, state=after, previous=prev)
+            return result
+        return self._transaction(resolve)

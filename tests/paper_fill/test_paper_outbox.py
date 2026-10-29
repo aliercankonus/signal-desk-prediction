@@ -348,7 +348,7 @@ def test_explicit_v1_migration_preserves_intent_reservations_and_outbox(tmp_path
     with sqlite3.connect(path) as raw:
         for name in REQUIRED_TRIGGERS.keys() - LEGACY_TRIGGERS.keys():
             raw.execute(f"DROP TRIGGER {name}")  # fixed in-repository names
-        for table in ("incidents", "cancels", "fills", "execution", "execution_meta",
+        for table in ("resolutions", "evidence", "incidents", "cancels", "fills", "execution", "execution_meta",
                       "acks", "receipts", "claims"):
             raw.execute(f"DROP TABLE {table}")  # fixed in-repository names
         raw.execute("UPDATE meta SET schema_version=1 WHERE id=1")
