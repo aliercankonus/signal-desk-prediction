@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExplicitObservedLocalPaperFill",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fill_id", "intent_id", "fill_ts", "delta_qty_btc", "cumulative_qty_btc", "price_usdt_per_btc", "fee_usdt", "source_kind", "mode", "fill_reason", "assumptions"],
+  "properties": {
+    "fill_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "intent_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "fill_ts": {"type": "string", "format": "date-time"},
+    "delta_qty_btc": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"},
+    "cumulative_qty_btc": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"},
+    "price_usdt_per_btc": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"},
+    "fee_usdt": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,15})(?:\\.[0-9]{1,8})?$"},
+    "source_kind": {"const": "already_observed_local_paper"},
+    "mode": {"enum": ["conservative", "neutral", "optimistic"]},
+    "fill_reason": {"const": "manual_reconcile"},
+    "assumptions": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string", "minLength": 1, "maxLength": 128}}
+  }
+}

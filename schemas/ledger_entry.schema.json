@@ -61,6 +61,12 @@
       "type": "object",
       "description": "Paper-only claim, local acceptance or ACK; never a fill"
     },
+    "execution": {
+      "type": "object",
+      "required": ["event", "state_after"],
+      "properties": {"event": {"type": "object"}, "state_after": {"type": "object"}},
+      "description": "Explicit local-paper fill, cancel or reconciliation transition"
+    },
     "position_state_after": {
       "type": [
         "string",
@@ -88,6 +94,15 @@
         "required": ["entry_type"]
       },
       "then": {"required": ["dispatch"]}
+    },
+    {
+      "if": {
+        "properties": {
+          "entry_type": {"enum": ["paper_fill", "cancel_requested", "cancelled", "reconcile"]}
+        },
+        "required": ["entry_type"]
+      },
+      "then": {"required": ["execution"]}
     }
   ]
 }
