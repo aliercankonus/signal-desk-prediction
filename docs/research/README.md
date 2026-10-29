@@ -30,6 +30,11 @@ parity for this research-only overlay.
 
 ### Completed raw COPY → bounded prefix (offline only)
 
+For a **review-only, unexecuted** root-operator sequence to verify the existing
+recovery evidence, make the read-only copy and invoke only this extractor, see
+[the research copy/extraction procedure](../RESEARCH_COPY_EXTRACTION_REVIEW.md).
+It does not authorize a new capture, a strategy run or deployment.
+
 `python -m signal_desk.research.extract_prefix` operates on a stopped, completed,
 read-only **copy** of the ordered raw directory, not a live collector or VPS volume.
 Its CLI is pinned to collector session
