@@ -23,7 +23,7 @@ SID = "c" * 32
 def fixture(tmp_path, times=(0, 1, 2, 30, 30, 60, 60, 90, 90, 120, 120,
                              150, 150, 180, 180, 210, 210, 240, 240,
                              270, 270, 300, 300, 330, 330, 360, 360), policy=None,
-            wide_ask_at=None, ask_updates=None):
+            wide_ask_at=None, ask_updates=None, trades_only=False):
     raw = tmp_path / "raw"
     raw.mkdir()
     pipeline = CausalFeaturePipeline(SID, policy)
@@ -34,7 +34,7 @@ def fixture(tmp_path, times=(0, 1, 2, 30, 30, 60, 60, 90, 90, 120, 120,
         stamp = (BASE + timedelta(seconds=second)).isoformat()
         if index == 1:
             event = map_snapshot({"lastUpdateId": 10, "bids": [["100", "2"]], "asks": [["100.10", "1"]]}, received_ts=stamp)
-        elif index % 2:
+        elif trades_only or index % 2:
             event = map_trade({"t": trade_id, "T": 1, "p": "100.05", "q": "0.25", "m": index % 4 == 1})
             trade_id += 1
         else:
@@ -82,11 +82,78 @@ def test_burst_older_than_both_windows_does_not_false_trip_event_cap(tmp_path):
     assert len(rows) == 2 * len(spec["candidates"]) * len(spec["horizons_seconds"])
 
 
-def test_required_rolling_window_over_cap_names_buffer_size_and_span(tmp_path):
-    raw, manifest, spec, _ = fixture(tmp_path, times=(0,) * 20_001)
+def test_required_rolling_flow_over_cap_names_buffer_size_and_span(tmp_path):
+    raw, manifest, spec, _ = fixture(tmp_path, times=(0,) * 20_002, trades_only=True)
     with pytest.raises(ResearchError, match=(
-        r"Rolling research history event cap reached: size=20001, cap=20000, "
+        r"Rolling research flow event cap reached: size=20001, cap=20000, "
         r"first_at=2026-10-28T00:00:00Z, last_at=2026-10-28T00:00:00Z")):
+        run_research(raw, manifest, spec)
+
+
+def test_dense_history_over_old_event_cap_keeps_every_verified_transition(tmp_path):
+    # 20,001 applied states at one timestamp; only ~10,000 are trades.
+    # Old per-event history rejects this before the first prediction tick.
+    raw, manifest, spec, _ = fixture(tmp_path,
+        times=(0,) * 20_001 + (30, 30, 60, 60, 90, 90, 120, 120))
+    results = run_research(raw, manifest, spec)
+    assert len(results) == 4 * len(spec["horizons_seconds"]) * len(spec["candidates"])
+    assert {r["prediction_at"] for r in results} == {
+        "2026-10-28T00:00:30Z", "2026-10-28T00:01:00Z",
+        "2026-10-28T00:01:30Z", "2026-10-28T00:02:00Z"}
+    assert manifest["expected_counts"]["trade"] < 20_000
+
+
+def test_grid_asof_states_match_naive_full_history_at_exact_boundaries():
+    from signal_desk.research.baselines import GridAsOfHistory
+    grid = GridAsOfHistory(BASE + timedelta(seconds=30))
+    applied = []
+    for index, second in enumerate((0, 0, 1, 29, 30, 30, 31, 59, 60, 60,
+                                    61, 89, 90, 90, 91, 119, 120, 120, 121, 600)):
+        at = BASE + timedelta(seconds=second)
+        while grid.tick < at:
+            cutoff = grid.tick - timedelta(seconds=60)
+            expected = next((item for item in reversed(applied) if item[0] <= cutoff), None)
+            assert grid.sample() == expected
+            grid.advance()
+        # The tuple contains an invalid/missing quote and freshness/bridge
+        # metadata; an equal-timestamp later state must replace an earlier one.
+        state = (at, index, None if index % 2 else "quote", index % 3 == 0,
+                 at - timedelta(seconds=1), at - timedelta(seconds=2))
+        grid.observe(state)
+        applied.append(state)
+        assert grid.retained_count <= 4
+    cutoff = grid.tick - timedelta(seconds=60)
+    assert grid.sample() == next((item for item in reversed(applied) if item[0] <= cutoff), None)
+
+
+@pytest.mark.parametrize("times,ask_updates,reference_sha256", [
+    ((0, 1, 2, 30, 30, 58, 58, 59, 59, 60, 60, 61, 61, 90, 90, 120, 120),
+     {59: [["100.10", "0"], ["102", "1"]],
+      60: [["102", "0"], ["100.10", "1"]]},
+     "b32e9238a2ac954e8edd191d139ccfa420ae18245a0b5b296bfd6b88ae90cc9c"),
+    ((0, 1, 2, 30, 30, 60, 60, 90, 90, 120, 120), None,
+     "b6907ce7983026de9ef75f1a8205a86e261c72511713e7abc8ec95045cd70e89"),
+])
+def test_compact_history_preserves_full_reference_rows(tmp_path, times, ask_updates, reference_sha256):
+    # Recorded from the unoptimized full-history runner on these bounded
+    # synthetic captures; compare the complete ordered rows, not just momentum.
+    raw, manifest, spec, _ = fixture(tmp_path, times=times, ask_updates=ask_updates)
+    rows = run_research(raw, manifest, spec)
+    encoded = b"".join(canonical_bytes(row) + b"\n" for row in rows)
+    assert hashlib.sha256(encoded).hexdigest() == reference_sha256
+
+
+def test_tampered_middle_capture_hash_still_fails_after_input_hash_update(tmp_path):
+    raw, manifest, spec, _ = fixture(tmp_path)
+    path = next(raw.glob("*trade*.jsonl"))
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    events[len(events) // 2]["data_quality"]["feature_sha256"] = "0" * 64
+    path.write_bytes(b"".join(canonical_bytes(event) + b"\n" for event in events))
+    for entry in manifest["files"]:
+        if entry["name"] == path.name:
+            entry["bytes"] = path.stat().st_size
+            entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with pytest.raises(ResearchError, match="Capture feature hash mismatch"):
         run_research(raw, manifest, spec)
 
 
