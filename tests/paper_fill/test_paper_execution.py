@@ -214,7 +214,7 @@ def test_explicit_v2_migration_preserves_receipt_ack_and_reservation(tmp_path):
     with sqlite3.connect(path) as raw:
         for name in REQUIRED_TRIGGERS.keys() - V2_TRIGGERS.keys():
             raw.execute(f"DROP TRIGGER {name}")  # fixed in-repository names only
-        for table in ("incidents", "cancels", "fills", "execution", "execution_meta"):
+        for table in ("resolutions", "evidence", "incidents", "cancels", "fills", "execution", "execution_meta"):
             raw.execute(f"DROP TABLE {table}")  # fixed in-repository names only
         raw.execute("UPDATE meta SET schema_version=2 WHERE id=1")
     with pytest.raises(PaperStorageError, match="migrate_v1/v2"):

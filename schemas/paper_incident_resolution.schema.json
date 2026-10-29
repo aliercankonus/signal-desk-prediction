@@ -1,0 +1,15 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"ExplicitSyntheticIncidentResolutionRequest",
+  "type":"object","additionalProperties":false,
+  "required":["reconciliation_id","fill_id","incident_hash","evidence_id","evidence_sha256","expected_head_hash","decision"],
+  "properties":{
+    "reconciliation_id":{"type":"string","pattern":"^[A-Za-z0-9_.:-]{1,128}$"},
+    "fill_id":{"type":"string","pattern":"^[A-Za-z0-9_.:-]{1,128}$"},
+    "evidence_id":{"type":"string","pattern":"^[A-Za-z0-9_.:-]{1,128}$"},
+    "incident_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "evidence_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "expected_head_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "decision":{"enum":["VERIFIED_EXECUTION","VERIFIED_NONEXECUTION","VERIFIED_DUPLICATE"]}
+  }
+}

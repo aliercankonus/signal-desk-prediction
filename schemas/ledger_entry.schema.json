@@ -33,6 +33,8 @@
         "position_closed",
         "mark_to_market",
         "reconcile",
+        "evidence_registered",
+        "incident_resolved",
         "eod_adjustment"
       ]
     },
@@ -73,6 +75,18 @@
       },
       "description": "Explicit local-paper fill, cancel or reconciliation transition"
     },
+    "evidence": {"type":"object"},
+    "evidence_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "evidence_byte_length": {"type":"integer","minimum":1,"maximum":4096},
+    "resolution": {
+      "type":"object", "additionalProperties":false,
+      "required":["request","result","state_after"],
+      "properties":{
+        "request":{"type":"object"},
+        "result":{"type":"object"},
+        "state_after":{"type":"object"}
+      }
+    },
     "position_state_after": {
       "type": [
         "string",
@@ -90,6 +104,8 @@
     }
   },
   "allOf": [
+    {"if":{"properties":{"entry_type":{"const":"evidence_registered"}},"required":["entry_type"]},"then":{"required":["evidence","evidence_sha256","evidence_byte_length"]}},
+    {"if":{"properties":{"entry_type":{"const":"incident_resolved"}},"required":["entry_type"]},"then":{"required":["resolution"]}},
     {
       "if": {
         "properties": {
