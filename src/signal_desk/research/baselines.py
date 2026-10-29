@@ -26,12 +26,47 @@ MAX_INPUT_BYTES = 256 * 1024 * 1024
 MAX_RECORDS = 200_000
 MAX_OUTPUT_ROWS = 100_000
 MAX_WINDOW_EVENTS = 20_000
+MAX_HISTORY_STATES = 4  # Three grid cutoffs plus the latest applied state.
 MAX_SPEC_BYTES = 64 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 
 
 class ResearchError(ValueError):
     """Manifest, quality, resource or output contract failed."""
+
+
+class GridAsOfHistory:
+    """Last applied state at each of the next three 60s lookback cutoffs.
+
+    Cutoffs for the next 30-second tick and its two successors are tick-60,
+    tick-30 and tick. A later event at the same timestamp replaces an earlier
+    one; invalid states are retained just like valid states. The fourth slot
+    is the latest applied state, used to bridge an event-free tick interval.
+    """
+
+    def __init__(self, tick):
+        self.tick = tick
+        self._slots = deque((None, None, None), maxlen=MAX_HISTORY_STATES - 1)
+        self._latest = None
+
+    @property
+    def retained_count(self):
+        return sum(state is not None for state in self._slots) + (self._latest is not None)
+
+    def sample(self):
+        return self._slots[0]
+
+    def advance(self):
+        self.tick += timedelta(seconds=30)
+        self._slots.append(self._latest if self._latest is not None
+                           and self._latest[0] <= self.tick else None)
+
+    def observe(self, state):
+        self._latest = state
+        cutoff = self.tick - timedelta(seconds=60)
+        for index in range(MAX_HISTORY_STATES - 1):
+            if state[0] <= cutoff + timedelta(seconds=30 * index):
+                self._slots[index] = state
 
 
 def decimal_score(value):
@@ -144,7 +179,7 @@ def run_research(raw_dir, manifest, spec, *, started=None):
     pipeline = None
     rows = []
     waiting = []
-    history = deque()
+    history = None
     flow = deque()
     last_snapshot = None
     last_depth = last_trade = None
@@ -190,23 +225,20 @@ def run_research(raw_dir, manifest, spec, *, started=None):
             row["label_direction"] = direction
 
     def expire_obsolete(at):
-        # Strict inequalities retain events exactly on either window boundary.
+        # Strict inequality retains trades exactly on the 30-second boundary.
         while flow and flow[0][0] < at - timedelta(seconds=30):
             flow.popleft()
-        while history and history[0][0] < at - timedelta(seconds=65):
-            history.popleft()
 
     def check_window_caps():
-        for name, buffer in (("history", history), ("flow", flow)):
-            if len(buffer) > limits["max_window_events"]:
-                raise ResearchError(
-                    f"Rolling research {name} event cap reached: "
-                    f"size={len(buffer)}, cap={limits['max_window_events']}, "
-                    f"first_at={buffer[0][0].isoformat().replace('+00:00', 'Z')}, "
-                    f"last_at={buffer[-1][0].isoformat().replace('+00:00', 'Z')}")
+        if len(flow) > limits["max_window_events"]:
+            raise ResearchError(
+                f"Rolling research flow event cap reached: "
+                f"size={len(flow)}, cap={limits['max_window_events']}, "
+                f"first_at={flow[0][0].isoformat().replace('+00:00', 'Z')}, "
+                f"last_at={flow[-1][0].isoformat().replace('+00:00', 'Z')}")
 
     def predict(at):
-        if pipeline is None:
+        if pipeline is None or history is None:
             raise ResearchError("No synchronized ordered session")
         if time.monotonic() > deadline:
             raise ResearchError("Research runtime budget exhausted")
@@ -218,8 +250,7 @@ def run_research(raw_dir, manifest, spec, *, started=None):
                    "stale" if not recent(at, last_depth, 2000) or not recent(at, last_trade, 3000) else
                    "spread" if (quote[1] - quote[0]) * 10000 / ((quote[1] + quote[0]) / 2) > 20 else "ok")
         midpoint = (quote[0] + quote[1]) / 2 if quality == "ok" else None
-        old = next((item for item in reversed(history)
-                    if item[0] <= at - timedelta(seconds=60)), None)
+        old = history.sample()
         if old is not None and (not recent(at - timedelta(seconds=60), old[0], 2000) or
                                 not acceptable_quote(at - timedelta(seconds=60),
                                     old[2], old[3], old[4], old[5])):
@@ -278,9 +309,13 @@ def run_research(raw_dir, manifest, spec, *, started=None):
             cadence = spec["prediction_cadence_seconds"]
             epoch = int(at.timestamp())
             tick = datetime.fromtimestamp((epoch // cadence + 1) * cadence, timezone.utc)
+            history = GridAsOfHistory(tick)
+        if history is None:
+            raise ResearchError("No synchronized ordered session")
         while tick < at:
             predict(tick)
-            tick += timedelta(seconds=30)
+            history.advance()
+            tick = history.tick
         # A transition may fall between ticks; expire before checking its new
         # state, without dropping anything needed by earlier predictions.
         expire_obsolete(at)
@@ -307,7 +342,7 @@ def run_research(raw_dir, manifest, spec, *, started=None):
         # Retain every applied state, including invalid or missing books: never
         # replace the latest lookback state with an earlier acceptable quote.
         midpoint = (quote[0] + quote[1]) / 2 if quote is not None else None
-        history.append((at, midpoint, quote, pipeline.bridged, last_depth, last_trade))
+        history.observe((at, midpoint, quote, pipeline.bridged, last_depth, last_trade))
         for item in waiting:
             if at <= item["due"]:
                 item.update(quote=quote, depth_at=last_depth, trade_at=last_trade,
