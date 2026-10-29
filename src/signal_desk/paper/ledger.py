@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, localcontext
 import hashlib
 import json
 import os
@@ -23,8 +23,10 @@ from signal_desk.schemas.validate import validate_json
 SCHEMAS = Path(__file__).resolve().parents[3] / "schemas"
 MAX_INTENTS = 2048
 MAX_CLAIMS_PER_INTENT = 4
+MAX_FILLS_PER_INTENT = 16
+MAX_INCIDENTS_PER_INTENT = 8
 LEASE_SECONDS = 30
-MAX_LEDGER_ENTRIES = (2 + MAX_CLAIMS_PER_INTENT + 2) * MAX_INTENTS
+MAX_LEDGER_ENTRIES = (2 + MAX_CLAIMS_PER_INTENT + 2 + MAX_FILLS_PER_INTENT + 2 + MAX_INCIDENTS_PER_INTENT) * MAX_INTENTS
 MAX_RECORD_BYTES = 4096
 MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_WAL_BYTES = 4 * 1024 * 1024
@@ -52,8 +54,24 @@ REQUIRED_TRIGGERS.update({
 })
 
 
+V2_TRIGGERS = REQUIRED_TRIGGERS.copy()
+REQUIRED_TRIGGERS.update({
+    "execution_no_delete": "CREATE TRIGGER execution_no_delete BEFORE DELETE ON execution BEGIN SELECT RAISE(ABORT, 'unresolved execution'); END",
+    "execution_meta_no_delete": "CREATE TRIGGER execution_meta_no_delete BEFORE DELETE ON execution_meta BEGIN SELECT RAISE(ABORT, 'execution totals'); END",
+    "fills_no_update": "CREATE TRIGGER fills_no_update BEFORE UPDATE ON fills BEGIN SELECT RAISE(ABORT, 'immutable fill'); END",
+    "fills_no_delete": "CREATE TRIGGER fills_no_delete BEFORE DELETE ON fills BEGIN SELECT RAISE(ABORT, 'immutable fill'); END",
+    "cancels_no_update": "CREATE TRIGGER cancels_no_update BEFORE UPDATE ON cancels BEGIN SELECT RAISE(ABORT, 'immutable cancel'); END",
+    "cancels_no_delete": "CREATE TRIGGER cancels_no_delete BEFORE DELETE ON cancels BEGIN SELECT RAISE(ABORT, 'immutable cancel'); END",
+    "incidents_no_update": "CREATE TRIGGER incidents_no_update BEFORE UPDATE ON incidents BEGIN SELECT RAISE(ABORT, 'immutable incident'); END",
+    "incidents_no_delete": "CREATE TRIGGER incidents_no_delete BEFORE DELETE ON incidents BEGIN SELECT RAISE(ABORT, 'immutable incident'); END",
+})
+
 class PaperStorageError(RuntimeError):
     """Storage is unhealthy or its durable state cannot be trusted."""
+
+
+class ReconciliationRequired(ValueError):
+    """A preserved late execution correction needs explicit reconciliation."""
 
 
 class Halted(PaperStorageError):
@@ -198,6 +216,75 @@ def _prepared(request):
     return content, intent
 
 
+def _decimal_text(value):
+    with localcontext() as ctx:
+        ctx.prec = 50
+        return format(Decimal(value).normalize(), "f")
+
+
+def _remaining_reserve(total, remaining, original_qty):
+    if Decimal(remaining) == 0:
+        return "0"
+    with localcontext() as ctx:
+        ctx.prec = 50
+        amount = (Decimal(total) * Decimal(remaining) / Decimal(original_qty)).quantize(
+            Decimal("0.0000000000000001"), rounding=ROUND_CEILING)
+        return _decimal_text(min(amount, Decimal(total)))
+
+
+def _initial_execution_state(intent):
+    return {"status": "OPEN", "filled_qty_btc": "0", "remaining_qty_btc": intent["qty"],
+            "cancelled_qty_btc": "0", "cash_reserved_usdt": intent["cash_reserve_usdt"],
+            "risk_reserved_usdt": intent["risk_reserve_usdt"], "filled_risk_exposure_usdt": "0",
+            "spent_usdt": "0", "fees_usdt": "0", "cancel_id": None}
+
+
+def _observed_fill(event):
+    required = {"fill_id", "intent_id", "fill_ts", "delta_qty_btc", "cumulative_qty_btc",
+                "price_usdt_per_btc", "fee_usdt", "source_kind", "mode", "fill_reason", "assumptions"}
+    if type(event) is not dict or set(event) != required or len(_json(event).encode("ascii")) > MAX_RECORD_BYTES:
+        raise ValueError("Bounded explicit observed fill fields required")
+    _identity(event["fill_id"]); _identity(event["intent_id"]); _time(event["fill_ts"])
+    if (event["source_kind"] != "already_observed_local_paper" or
+        event["mode"] not in ("conservative", "neutral", "optimistic") or
+        event["fill_reason"] != "manual_reconcile"):
+        raise ValueError("Only explicitly observed local-paper fill records are accepted")
+    assumptions = event["assumptions"]
+    if (type(assumptions) is not list or not 1 <= len(assumptions) <= 4 or
+        any(type(s) is not str or not 1 <= len(s) <= 128 for s in assumptions)):
+        raise ValueError("Bounded explicit fill assumptions required")
+    result = dict(event)
+    for key, positive in (("delta_qty_btc", True), ("cumulative_qty_btc", True),
+                          ("price_usdt_per_btc", True), ("fee_usdt", False)):
+        result[key] = _amount(event[key], positive=positive)
+    validate_json(result, "paper_execution_event.schema.json", SCHEMAS)
+    return result
+
+
+def _fill_transition(state, intent, event):
+    if state["status"] not in ("OPEN", "PARTIALLY_FILLED", "CANCEL_PENDING"):
+        raise ReconciliationRequired("Terminal fill is a reconciliation incident")
+    with localcontext() as ctx:
+        ctx.prec = 50
+        delta = Decimal(event["delta_qty_btc"])
+        filled = Decimal(state["filled_qty_btc"]) + delta
+        remaining = Decimal(state["remaining_qty_btc"]) - delta
+        if remaining < 0 or filled != Decimal(event["cumulative_qty_btc"]):
+            raise DuplicateConflict("Fill delta/cumulative mismatch or overfill")
+        spent = Decimal(state["spent_usdt"]) + delta * Decimal(event["price_usdt_per_btc"]) + Decimal(event["fee_usdt"])
+        fee_total = Decimal(state["fees_usdt"]) + Decimal(event["fee_usdt"])
+        cash_reserve = _remaining_reserve(intent["cash_reserve_usdt"], remaining, intent["qty"])
+        risk_reserve = _remaining_reserve(intent["risk_reserve_usdt"], remaining, intent["qty"])
+        next_state = {**state, "filled_qty_btc": _decimal_text(filled),
+                      "remaining_qty_btc": _decimal_text(remaining),
+                      "cash_reserved_usdt": cash_reserve, "risk_reserved_usdt": risk_reserve,
+                      "filled_risk_exposure_usdt": _decimal_text(Decimal(intent["risk_reserve_usdt"]) - Decimal(risk_reserve)),
+                      "spent_usdt": _decimal_text(spent), "fees_usdt": _decimal_text(fee_total)}
+        next_state["status"] = ("CANCEL_PENDING" if state["status"] == "CANCEL_PENDING" else
+                                 "FILLED" if remaining == 0 else "PARTIALLY_FILLED")
+        return next_state
+
+
 class PaperLedger:
     def __init__(self, path, *, initial=None, allow_legacy=False):
         self.path = Path(path).absolute()
@@ -251,7 +338,7 @@ class PaperLedger:
 
     @classmethod
     def migrate_v1(cls, path):
-        """Explicit atomic v1-to-v2 migration; never alter an unverified DB."""
+        """Explicit atomic v1-to-v3 migration; never alter an unverified DB."""
         store = cls(path, allow_legacy=True)
         try:
             if store._meta()[0] != 1:
@@ -259,10 +346,32 @@ class PaperLedger:
             def migrate():
                 store._verify_recovery_snapshot()
                 store._install_dispatch_tables()
+                store._install_execution_tables()
                 for name, sql in REQUIRED_TRIGGERS.items():
                     if name not in LEGACY_TRIGGERS:
                         store._conn.execute(sql)
-                store._conn.execute("UPDATE meta SET schema_version=2 WHERE id=1")
+                store._backfill_execution()
+                store._conn.execute("UPDATE meta SET schema_version=3 WHERE id=1")
+            store._transaction(migrate)
+        finally:
+            store.close()
+        return cls.open(path)
+
+    @classmethod
+    def migrate_v2(cls, path):
+        """Explicit verified v2-to-v3 migration preserving claims and receipts."""
+        store = cls(path, allow_legacy=True)
+        try:
+            if store._meta()[0] != 2:
+                raise PaperStorageError("Only verified schema v2 can be migrated")
+            def migrate():
+                store._verify_recovery_snapshot()
+                store._install_execution_tables()
+                for name, sql in REQUIRED_TRIGGERS.items():
+                    if name not in V2_TRIGGERS:
+                        store._conn.execute(sql)
+                store._backfill_execution()
+                store._conn.execute("UPDATE meta SET schema_version=3 WHERE id=1")
             store._transaction(migrate)
         finally:
             store.close()
@@ -300,9 +409,11 @@ class PaperLedger:
                 payload TEXT NOT NULL, hash TEXT NOT NULL, prev_hash TEXT);
         """)
         self._install_dispatch_tables()
+        self._install_execution_tables()
         for sql in REQUIRED_TRIGGERS.values():
             self._conn.execute(sql)
-        self._conn.execute("INSERT INTO meta VALUES(1,2,?,?, '0','0',0,0,NULL,NULL)", (cash, risk))
+        self._conn.execute("INSERT INTO meta VALUES(1,3,?,?, '0','0',0,0,NULL,NULL)", (cash, risk))
+        self._conn.execute("INSERT INTO execution_meta VALUES(1,?, '0', '0')", (cash,))
         self._conn.commit()
 
     def _install_dispatch_tables(self):
@@ -315,10 +426,30 @@ class PaperLedger:
         self._conn.execute("CREATE TABLE acks (intent_id TEXT PRIMARY KEY REFERENCES receipts(intent_id),"
             "ack TEXT NOT NULL)")
 
+    def _install_execution_tables(self):
+        self._conn.execute("CREATE TABLE execution (intent_id TEXT PRIMARY KEY REFERENCES intents(intent_id),"
+                           "state TEXT NOT NULL)")
+        self._conn.execute("CREATE TABLE execution_meta (id INTEGER PRIMARY KEY CHECK(id=1),"
+                           "cash_actual TEXT NOT NULL, base_actual TEXT NOT NULL, risk_filled TEXT NOT NULL)")
+        self._conn.execute("CREATE TABLE fills (fill_id TEXT PRIMARY KEY,"
+                           "intent_id TEXT NOT NULL REFERENCES intents(intent_id), payload TEXT NOT NULL)")
+        self._conn.execute("CREATE TABLE cancels (intent_id TEXT NOT NULL REFERENCES intents(intent_id),"
+                           "kind TEXT NOT NULL CHECK(kind IN ('requested','confirmed')), payload TEXT NOT NULL,"
+                           "PRIMARY KEY(intent_id,kind))")
+        self._conn.execute("CREATE TABLE incidents (fill_id TEXT PRIMARY KEY,"
+                           "intent_id TEXT NOT NULL REFERENCES intents(intent_id), payload TEXT NOT NULL)")
+
+    def _backfill_execution(self):
+        cash = self._meta()[1]
+        self._conn.execute("INSERT INTO execution_meta VALUES(1,?, '0', '0')", (cash,))
+        for iid, text in self._conn.execute("SELECT intent_id,intent_json FROM intents"):
+            self._conn.execute("INSERT INTO execution VALUES(?,?)",
+                               (iid, _json(_initial_execution_state(json.loads(text)))))
+
     def _meta(self):
         row = self._conn.execute("SELECT schema_version,initial_cash,risk_budget,cash_reserved,"
             "risk_reserved,portfolio_version,writer_epoch,writer_id,last_hash FROM meta WHERE id=1").fetchone()
-        if row is None or row[0] not in (1, 2):
+        if row is None or row[0] not in (1, 2, 3):
             raise PaperStorageError("Missing or unsupported paper ledger metadata")
         return row
 
@@ -338,7 +469,8 @@ class PaperLedger:
     def _verify_triggers(self):
         actual_triggers = dict(self._conn.execute(
             "SELECT name,sql FROM sqlite_master WHERE type='trigger'"))
-        expected = LEGACY_TRIGGERS if self._meta()[0] == 1 else REQUIRED_TRIGGERS
+        schema = self._meta()[0]
+        expected = LEGACY_TRIGGERS if schema == 1 else (V2_TRIGGERS if schema == 2 else REQUIRED_TRIGGERS)
         if actual_triggers != expected:
             raise PaperStorageError("Missing or altered append-only trigger")
 
@@ -351,7 +483,7 @@ class PaperLedger:
                                   (MAX_LEDGER_ENTRIES + 1,)).fetchall()
         if schema == 1 and len(rows) != 2 * version:
             raise PaperStorageError("Ledger entry count does not match portfolio version")
-        if schema == 2 and (len(rows) < 2 * version or len(rows) > MAX_LEDGER_ENTRIES):
+        if schema in (2, 3) and (len(rows) < 2 * version or len(rows) > MAX_LEDGER_ENTRIES):
             raise PaperStorageError("Ledger entry count exceeds dispatch bound")
         previous = None
         created = {}
@@ -359,6 +491,9 @@ class PaperLedger:
         claims = {}
         receipts = {}
         acks = {}
+        execution_events = {}
+        seen_incident = False
+        incident_barrier = False
         for text,digest,prev in rows:
             if len(text.encode("utf-8")) > MAX_RECORD_BYTES or prev != previous:
                 raise PaperStorageError("Ledger chain or record bound failed")
@@ -367,11 +502,13 @@ class PaperLedger:
                 raise PaperStorageError("Ledger hash mismatch")
             validate_json(item, "ledger_entry.schema.json", SCHEMAS)
             iid = item["intent_id"]
+            if incident_barrier and item["entry_type"] in ("risk_reserved", "paper_fill", "cancelled"):
+                raise PaperStorageError("Risk, fill or cancellation release after unresolved incident")
             if item["entry_type"] == "intent_created" and iid not in created:
                 created[iid] = item["intent"]
             elif item["entry_type"] == "risk_reserved" and iid in created and iid not in reserved:
                 reserved[iid] = item["amounts"]
-            elif (schema == 2 and item["entry_type"] == "outbox_claimed" and
+            elif (schema >= 2 and item["entry_type"] == "outbox_claimed" and
                   iid in reserved and iid not in receipts and iid not in acks):
                 envelope = item.get("dispatch")
                 prior_claims = claims.setdefault(iid, [])
@@ -381,19 +518,40 @@ class PaperLedger:
                     or item["ts"] != envelope.get("claimed_at")):
                     raise PaperStorageError("Invalid claim ledger event")
                 prior_claims.append(envelope)
-            elif schema == 2 and item["entry_type"] == "local_accepted" and iid in claims and iid not in receipts:
+            elif schema >= 2 and item["entry_type"] == "local_accepted" and iid in claims and iid not in receipts:
                 receipt = item.get("dispatch")
                 if (not isinstance(receipt, dict) or receipt.get("intent_id") != iid
                     or item["ts"] != receipt.get("accepted_at")):
                     raise PaperStorageError("Invalid local acceptance ledger event")
                 receipts[iid] = receipt
-            elif schema == 2 and item["entry_type"] == "outbox_acked" and iid in receipts and iid not in acks:
+            elif schema >= 2 and item["entry_type"] == "outbox_acked" and iid in receipts and iid not in acks:
                 ack = item.get("dispatch")
                 if (not isinstance(ack, dict) or ack.get("intent_id") != iid
                     or ack.get("receipt_id") != receipts[iid].get("receipt_id")
                     or item["ts"] != ack.get("acked_at")):
                     raise PaperStorageError("Invalid acceptance ACK ledger event")
                 acks[iid] = ack
+            elif (schema == 3 and item["entry_type"] in
+                  ("paper_fill", "cancel_requested", "cancelled", "reconcile") and iid in receipts):
+                detail = item.get("execution")
+                if (not isinstance(detail, dict) or not isinstance(detail.get("event"), dict)
+                    or not isinstance(detail.get("state_after"), dict)
+                    or detail["event"].get("intent_id") != iid
+                    or (item["entry_type"] != "reconcile" and "reason" in detail)
+                    or (detail.get("reason") == "unresolved_incident" and not seen_incident)
+                    or (item["entry_type"] == "reconcile" and "reason" in detail and
+                        seen_incident and detail["reason"] != "unresolved_incident")
+                    or (item["entry_type"] == "reconcile" and incident_barrier and
+                        detail.get("reason") != "unresolved_incident")
+                    or item["ts"] != detail["event"].get(
+                        "fill_ts" if item["entry_type"] in ("paper_fill", "reconcile") else
+                        "requested_at" if item["entry_type"] == "cancel_requested" else "confirmed_at")):
+                    raise PaperStorageError("Invalid execution ledger event")
+                execution_events.setdefault(iid, []).append((item["entry_type"], detail))
+                if item["entry_type"] == "reconcile":
+                    seen_incident = True
+                    if "reason" in detail:
+                        incident_barrier = True
             else:
                 raise PaperStorageError("Unexpected ledger event sequence")
             previous = digest
@@ -420,13 +578,17 @@ class PaperLedger:
                         reserved[iid]["risk_reserved_usdt"]) or out != (intent_json, "PENDING_SEND"):
                     raise PaperStorageError("Reservation or pending outbox differs from ledger")
                 observed_cash += Decimal(row[0]); observed_risk += Decimal(row[1])
-            if (observed_cash != Decimal(cash_total) or observed_risk != Decimal(risk_total)
+            if schema != 3 and (observed_cash != Decimal(cash_total) or observed_risk != Decimal(risk_total)
                 or observed_cash > Decimal(cash) or observed_risk > Decimal(budget)):
                 raise PaperStorageError("Reserved budgets differ from ledger")
-        if schema == 2:
-            self._verify_dispatch_state(version, created, claims, receipts, acks, len(rows))
+        if schema >= 2:
+            execution_count = sum(map(len, execution_events.values()))
+            self._verify_dispatch_state(version, created, claims, receipts, acks, len(rows) - execution_count)
+        if schema == 3:
+            self._verify_execution_state(created, receipts, execution_events, cash, budget,
+                                         cash_total, risk_total, rows)
         elif not self._allow_legacy:
-            raise PaperStorageError("Schema v1 requires explicit PaperLedger.migrate_v1(path)")
+            raise PaperStorageError("Schema v1/v2 requires explicit PaperLedger.migrate_v1/v2(path)")
 
     def _verify_dispatch_state(self, version, created, claims, receipts, acks, entry_count):
         total_claims = sum(map(len, claims.values()))
@@ -476,6 +638,194 @@ class PaperLedger:
                 ack.get("receipt_id") != receipts[iid]["receipt_id"] or
                 _time(ack["acked_at"]) < _time(receipts[iid]["accepted_at"])):
                 raise PaperStorageError("ACK differs from acceptance ledger")
+
+    def _verify_execution_state(self, created, receipts, events, cash, budget,
+                                cash_total, risk_total, ledger_rows):
+        expected_fills = {}; expected_cancels = {}; expected_incidents = {}; expected_states = {}
+        with localcontext() as ctx:
+            ctx.prec = 50
+            reserved_cash = reserved_risk = filled_risk = spent = base = Decimal(0)
+            for iid, intent in created.items():
+                state = _initial_execution_state(intent)
+                requested = None
+                latest_fill = None
+                fill_count = incident_count = 0
+                for kind, detail in events.get(iid, []):
+                    event = detail["event"]
+                    try:
+                        if kind in ("paper_fill", "reconcile"):
+                            if _observed_fill(event) != event or (kind == "paper_fill" and
+                                _time(event["fill_ts"]) < _time(receipts[iid]["accepted_at"])):
+                                raise ValueError("Noncanonical or pre-acceptance fill")
+                            fid = event["fill_id"]
+                            if fid in expected_fills or fid in expected_incidents:
+                                raise ValueError("Reused fill identity")
+                            if kind == "paper_fill":
+                                fill_count += 1
+                                if fill_count > MAX_FILLS_PER_INTENT:
+                                    raise ValueError("Fill bound")
+                                state = _fill_transition(state, intent, event)
+                                fill_time = _time(event["fill_ts"])
+                                latest_fill = max(latest_fill, fill_time) if latest_fill else fill_time
+                                result = {"status": state["status"], "intent_id": iid, "fill_id": fid}
+                                expected_fills[fid] = (iid, _json({"event": event, "result": result}))
+                            else:
+                                incident_count += 1
+                                if incident_count > MAX_INCIDENTS_PER_INTENT:
+                                    raise ValueError("Incident bound")
+                                reason = detail.get("reason")
+                                terminal = state["status"] in ("CANCELLED", "FILLED")
+                                delta = Decimal(event["delta_qty_btc"])
+                                overfill = delta > Decimal(state["remaining_qty_btc"])
+                                mismatched = Decimal(state["filled_qty_btc"]) + delta != Decimal(event["cumulative_qty_btc"])
+                                early = _time(event["fill_ts"]) < _time(receipts[iid]["accepted_at"])
+                                if terminal:
+                                    if reason not in (None, "unresolved_incident"):
+                                        raise ValueError("Terminal incident reason differs")
+                                elif reason != "unresolved_incident":
+                                    expected_reason = (
+                                        "pre_acceptance" if early else
+                                        "fill_limit" if fill_count >= MAX_FILLS_PER_INTENT else
+                                        "overfill" if overfill else
+                                        "cumulative_mismatch" if mismatched else
+                                        "accounting_limit")
+                                    if reason != expected_reason:
+                                        raise ValueError("Incident reason or validation precedence differs")
+                                result = {"status": "RECONCILIATION_INCIDENT", "intent_id": iid, "fill_id": fid}
+                                if reason is not None:
+                                    result["reason"] = reason
+                                expected_incidents[fid] = (iid, _json({"event": event, "result": result}))
+                        elif kind == "cancel_requested":
+                            if (set(event) != {"intent_id", "cancel_id", "requested_at"} or
+                                event["intent_id"] != iid or requested is not None or
+                                state["status"] not in ("OPEN", "PARTIALLY_FILLED")):
+                                raise ValueError("Invalid cancel request")
+                            _identity(event["cancel_id"]); _time(event["requested_at"])
+                            if _time(event["requested_at"]) < _time(receipts[iid]["accepted_at"]):
+                                raise ValueError("Cancellation precedes local acceptance")
+                            requested = event
+                            state = {**state, "status": "CANCEL_PENDING", "cancel_id": event["cancel_id"]}
+                            result = {"status": "CANCEL_PENDING", "intent_id": iid, "cancel_id": event["cancel_id"]}
+                            expected_cancels[(iid, "requested")] = _json({"event": event, "result": result})
+                        elif kind == "cancelled":
+                            if (set(event) != {"intent_id", "cancel_id", "confirmed_at"} or
+                                event["intent_id"] != iid or requested is None or
+                                state["status"] != "CANCEL_PENDING" or
+                                (iid, "confirmed") in expected_cancels or
+                                requested["cancel_id"] != event["cancel_id"] or
+                                _time(event["confirmed_at"]) < _time(requested["requested_at"]) or
+                                (latest_fill is not None and _time(event["confirmed_at"]) < latest_fill)):
+                                raise ValueError("Invalid cancel confirmation")
+                            state = {**state, "status": "CANCELLED" if Decimal(state["remaining_qty_btc"]) else "FILLED",
+                                     "cancelled_qty_btc": state["remaining_qty_btc"],
+                                     "remaining_qty_btc": "0", "cash_reserved_usdt": "0", "risk_reserved_usdt": "0"}
+                            result = {"status": state["status"], "intent_id": iid, "cancel_id": event["cancel_id"]}
+                            expected_cancels[(iid, "confirmed")] = _json({"event": event, "result": result})
+                        else:
+                            raise ValueError("Unknown execution event")
+                        if detail["state_after"] != state:
+                            raise ValueError("Execution event does not match reconstructed state")
+                        if (Decimal(state["filled_qty_btc"]) + Decimal(state["remaining_qty_btc"]) +
+                            Decimal(state["cancelled_qty_btc"]) != Decimal(intent["qty"])):
+                            raise ValueError("Quantity conservation failed")
+                    except (ValueError, KeyError, TypeError, ArithmeticError) as exc:
+                        raise PaperStorageError("Execution recovery event or chronology differs") from exc
+                expected_states[iid] = _json(state)
+                reserved_cash += Decimal(state["cash_reserved_usdt"])
+                reserved_risk += Decimal(state["risk_reserved_usdt"])
+                filled_risk += Decimal(state["filled_risk_exposure_usdt"])
+                spent += Decimal(state["spent_usdt"])
+                base += Decimal(state["filled_qty_btc"])
+                if (any(Decimal(state[key]) < 0 for key in (
+                    "filled_qty_btc", "remaining_qty_btc", "cancelled_qty_btc", "cash_reserved_usdt",
+                    "risk_reserved_usdt", "filled_risk_exposure_usdt", "spent_usdt", "fees_usdt")) or
+                    Decimal(state["risk_reserved_usdt"]) + Decimal(state["filled_risk_exposure_usdt"]) > Decimal(intent["risk_reserve_usdt"]) or
+                    Decimal(state["fees_usdt"]) > Decimal(state["spent_usdt"])):
+                    raise PaperStorageError("Execution inventory/risk conservation failed")
+            actual_cash = Decimal(cash) - spent
+            if (reserved_cash != Decimal(cash_total) or reserved_risk != Decimal(risk_total) or
+                actual_cash < 0 or base < 0 or reserved_cash > actual_cash or
+                reserved_risk + filled_risk > Decimal(budget)):
+                raise PaperStorageError("Execution cash/base/reservation totals differ")
+            if self._conn.execute("SELECT count(*) FROM execution_meta").fetchone()[0] != 1 or \
+               self._execution_meta() != (_decimal_text(actual_cash), _decimal_text(base), _decimal_text(filled_risk)):
+                raise PaperStorageError("Execution materialized portfolio differs")
+        observed_states = dict(self._conn.execute("SELECT intent_id,state FROM execution LIMIT ?",
+                                                  (MAX_INTENTS + 1,)).fetchall())
+        if observed_states != expected_states:
+            raise PaperStorageError("Execution state differs from ledger")
+        for table, expected, cols, limit in (
+            ("fills", expected_fills, "fill_id,intent_id,payload", MAX_INTENTS * MAX_FILLS_PER_INTENT + 1),
+            ("incidents", expected_incidents, "fill_id,intent_id,payload", MAX_INTENTS * MAX_INCIDENTS_PER_INTENT + 1)):
+            rows = self._conn.execute(f"SELECT {cols} FROM {table} LIMIT ?", (limit,)).fetchall()
+            if len(rows) != len(expected) or any(expected.get(fid) != (iid, text) for fid, iid, text in rows):
+                raise PaperStorageError("Execution fill/incident table differs from ledger")
+        cancel_rows = self._conn.execute("SELECT intent_id,kind,payload FROM cancels LIMIT ?",
+                                         (2 * MAX_INTENTS + 1,)).fetchall()
+        if len(cancel_rows) != len(expected_cancels) or any(
+            expected_cancels.get((iid, kind)) != text for iid, kind, text in cancel_rows):
+            raise PaperStorageError("Cancel history differs from ledger")
+        self._verify_execution_accounting_order(ledger_rows, created, expected_states, cash,
+                                                budget, cash_total, risk_total)
+
+    def _verify_execution_accounting_order(self, rows, created, expected_states,
+                                           cash, budget, cash_total, risk_total):
+        """Recheck cost incidents against the portfolio at their ledger position."""
+        with localcontext() as ctx:
+            ctx.prec = 50
+            actual = Decimal(cash)
+            reserved_cash = reserved_risk = filled_risk = Decimal(0)
+            states = {}
+
+            def candidate(before, after):
+                next_cash = actual - (Decimal(after["spent_usdt"]) - Decimal(before["spent_usdt"]))
+                next_reserved_cash = reserved_cash + Decimal(after["cash_reserved_usdt"]) - Decimal(before["cash_reserved_usdt"])
+                next_reserved_risk = reserved_risk + Decimal(after["risk_reserved_usdt"]) - Decimal(before["risk_reserved_usdt"])
+                next_filled_risk = filled_risk + Decimal(after["filled_risk_exposure_usdt"]) - Decimal(before["filled_risk_exposure_usdt"])
+                if (min(next_cash, next_reserved_cash, next_reserved_risk, next_filled_risk) < 0 or
+                    next_reserved_cash > next_cash or next_reserved_risk + next_filled_risk > Decimal(budget)):
+                    raise BudgetExceeded("Execution accounting limit")
+                return next_cash, next_reserved_cash, next_reserved_risk, next_filled_risk
+
+            for text, _, _ in rows:
+                item = json.loads(text)
+                iid = item["intent_id"]
+                kind = item["entry_type"]
+                if kind == "risk_reserved":
+                    if iid in states:
+                        raise PaperStorageError("Repeated execution reservation")
+                    state = _initial_execution_state(created[iid])
+                    states[iid] = state
+                    reserved_cash += Decimal(state["cash_reserved_usdt"])
+                    reserved_risk += Decimal(state["risk_reserved_usdt"])
+                    if reserved_cash > actual or reserved_risk + filled_risk > Decimal(budget):
+                        raise PaperStorageError("Execution reservation chronology differs")
+                elif kind in ("paper_fill", "cancel_requested", "cancelled", "reconcile"):
+                    if iid not in states:
+                        raise PaperStorageError("Execution precedes reservation")
+                    detail = item["execution"]
+                    before = states[iid]
+                    if kind == "reconcile":
+                        if detail.get("reason") == "accounting_limit":
+                            after = _fill_transition(before, created[iid], detail["event"])
+                            try:
+                                candidate(before, after)
+                            except BudgetExceeded:
+                                pass
+                            else:
+                                raise PaperStorageError("Accounting incident had no limit violation")
+                        continue
+                    after = detail["state_after"]
+                    try:
+                        actual, reserved_cash, reserved_risk, filled_risk = candidate(before, after)
+                    except BudgetExceeded as exc:
+                        raise PaperStorageError("Applied execution violates accounting chronology") from exc
+                    states[iid] = after
+            if ({iid: _json(state) for iid, state in states.items()} != expected_states or
+                reserved_cash != Decimal(cash_total) or reserved_risk != Decimal(risk_total) or
+                (_decimal_text(actual), _decimal_text(filled_risk)) !=
+                    (self._execution_meta()[0], self._execution_meta()[2])):
+                raise PaperStorageError("Execution chronological portfolio differs from ledger")
 
     def _ready(self):
         if self._closed or self._halted:
@@ -574,6 +924,8 @@ class PaperLedger:
             if self._conn.execute("SELECT 1 FROM receipts LEFT JOIN acks USING(intent_id) "
                                   "WHERE acks.intent_id IS NULL LIMIT 1").fetchone():
                 raise ReceiptPending("Reconcile local acceptance before admitting new risk")
+            if self._conn.execute("SELECT 1 FROM incidents LIMIT 1").fetchone():
+                raise ReconciliationRequired("Late execution incident blocks new risk")
             if request.portfolio_version != version:
                 raise StalePortfolio("Portfolio version changed")
             if version >= MAX_INTENTS:
@@ -582,7 +934,8 @@ class PaperLedger:
                 ctx.prec = 50
                 next_cash = Decimal(cash_total) + Decimal(content["cash_reserve_usdt"])
                 next_risk = Decimal(risk_total) + Decimal(content["risk_reserve_usdt"])
-                if next_cash > Decimal(cash) or next_risk > Decimal(budget):
+                actual_cash, _, filled_risk = self._execution_meta()
+                if next_cash > Decimal(actual_cash) or next_risk + Decimal(filled_risk) > Decimal(budget):
                     raise BudgetExceeded("Insufficient unreserved paper cash or risk budget")
             self._conn.execute("INSERT INTO intents VALUES(?,?,?,?,?)", (intent["intent_id"],
                                content_json,intent_json,intent["fingerprint"],version))
@@ -590,6 +943,8 @@ class PaperLedger:
                                content["cash_reserve_usdt"],content["risk_reserve_usdt"]))
             self._conn.execute("INSERT INTO outbox VALUES(?,?, 'PENDING_SEND')",
                                (intent["intent_id"],intent_json))
+            self._conn.execute("INSERT INTO execution VALUES(?,?)",
+                               (intent["intent_id"], _json(_initial_execution_state(intent))))
             prev = self._append_ledger(intent=intent,kind="intent_created",amounts={},previous=prev)
             prev = self._append_ledger(intent=intent,kind="risk_reserved",amounts={
                 "cash_reserved_usdt": content["cash_reserve_usdt"],
@@ -603,12 +958,26 @@ class PaperLedger:
             return {"intent_id": intent["intent_id"], "duplicate": False, "outbox": intent}
         return self._transaction(reserve_one)
 
+    def _execution_meta(self):
+        row = self._conn.execute("SELECT cash_actual,base_actual,risk_filled FROM execution_meta WHERE id=1").fetchone()
+        if row is None:
+            raise PaperStorageError("Missing paper execution totals")
+        return row
+
     def snapshot(self):
-        self._ready()
-        _,cash,budget,cash_total,risk_total,version,epoch,writer,_ = self._meta()
-        return {"initial_cash_usdt": cash, "risk_budget_usdt": budget,
-                "cash_reserved_usdt": cash_total, "risk_reserved_usdt": risk_total,
-                "portfolio_version": version, "writer_epoch": epoch, "writer_id": writer}
+        def read():
+            _,cash,budget,cash_total,risk_total,version,epoch,writer,_ = self._meta()
+            actual_cash, actual_base, risk_filled = self._execution_meta()
+            with localcontext() as ctx:
+                ctx.prec = 50
+                available = _decimal_text(Decimal(actual_cash) - Decimal(cash_total))
+            return {"initial_cash_usdt": cash, "risk_budget_usdt": budget,
+                    "cash_reserved_usdt": cash_total, "risk_reserved_usdt": risk_total,
+                    "cash_actual_usdt": actual_cash, "base_actual_btc": actual_base,
+                    "filled_risk_exposure_usdt": risk_filled,
+                    "cash_available_usdt": available,
+                    "portfolio_version": version, "writer_epoch": epoch, "writer_id": writer}
+        return self._transaction(read)
 
     def _fenced_read(self, action, *, writer_id, writer_epoch):
         _identity(writer_id)
@@ -802,3 +1171,212 @@ class PaperLedger:
                 details=ack_record, ts=acked_at, suffix=1, previous=prev)
             return ack_record
         return self._transaction(ack)
+
+    def _execution_row(self, intent_id):
+        row = self._conn.execute("SELECT execution.state,outbox.payload FROM execution "
+                                 "JOIN outbox USING(intent_id) WHERE intent_id=?", (intent_id,)).fetchone()
+        if row is None:
+            raise ClaimUnavailable("Unknown committed paper intent")
+        return json.loads(row[0]), json.loads(row[1])
+
+    def _update_execution(self, intent_id, before, after):
+        cash, base, risk_filled = self._execution_meta()
+        _, _, budget, cash_reserved, risk_reserved, _, _, _, _ = self._meta()
+        with localcontext() as ctx:
+            ctx.prec = 50
+            cash_next = Decimal(cash) - (Decimal(after["spent_usdt"]) - Decimal(before["spent_usdt"]))
+            base_next = Decimal(base) + (Decimal(after["filled_qty_btc"]) - Decimal(before["filled_qty_btc"]))
+            reserve_next = Decimal(cash_reserved) + Decimal(after["cash_reserved_usdt"]) - Decimal(before["cash_reserved_usdt"])
+            risk_next = Decimal(risk_reserved) + Decimal(after["risk_reserved_usdt"]) - Decimal(before["risk_reserved_usdt"])
+            exposure_next = Decimal(risk_filled) + Decimal(after["filled_risk_exposure_usdt"]) - Decimal(before["filled_risk_exposure_usdt"])
+            if (cash_next < 0 or base_next < 0 or reserve_next < 0 or risk_next < 0 or
+                exposure_next < 0 or reserve_next > cash_next or risk_next + exposure_next > Decimal(budget)):
+                raise BudgetExceeded("Observed fill violates cash/base/risk conservation")
+        self._conn.execute("UPDATE execution SET state=? WHERE intent_id=?", (_json(after), intent_id))
+        self._conn.execute("UPDATE execution_meta SET cash_actual=?,base_actual=?,risk_filled=? WHERE id=1",
+                           (_decimal_text(cash_next), _decimal_text(base_next), _decimal_text(exposure_next)))
+        self._conn.execute("UPDATE meta SET cash_reserved=?,risk_reserved=? WHERE id=1",
+                           (_decimal_text(reserve_next), _decimal_text(risk_next)))
+
+    def _append_execution_event(self, *, kind, intent, event, state, ts, suffix, previous, reason=None):
+        execution = {"event": event, "state_after": state}
+        if reason is not None:
+            execution["reason"] = reason
+        entry = {"ledger_id": "led_" + intent["intent_id"] + "_" + kind + "_" + suffix,
+                 "ts": ts, "entry_type": kind, "symbol": "BTCUSDT",
+                 "config_version": intent["config_version"], "intent_id": intent["intent_id"],
+                 "amounts": {}, "execution": execution,
+                 "prev_hash": previous}
+        if kind in ("paper_fill", "reconcile"):
+            entry["fill_id"] = event["fill_id"]
+        entry["hash"] = _digest(entry)
+        validate_json(entry, "ledger_entry.schema.json", SCHEMAS)
+        encoded = _json(entry)
+        if len(encoded.encode("ascii")) > MAX_RECORD_BYTES:
+            raise PaperStorageError("Execution ledger record exceeds storage bound")
+        self._conn.execute("INSERT INTO ledger(ledger_id,payload,hash,prev_hash) VALUES(?,?,?,?)",
+                           (entry["ledger_id"], encoded, entry["hash"], previous))
+        self._conn.execute("UPDATE meta SET last_hash=? WHERE id=1", (entry["hash"],))
+
+    def _record_execution_incident(self, iid, intent, state, observation, previous, *, reason=None):
+        count = self._conn.execute("SELECT count(*) FROM incidents WHERE intent_id=?", (iid,)).fetchone()[0]
+        if count >= MAX_INCIDENTS_PER_INTENT:
+            raise PaperStorageError("Observed fill incident storage bound reached; admission halted")
+        result = {"status": "RECONCILIATION_INCIDENT", "intent_id": iid,
+                  "fill_id": observation["fill_id"]}
+        if reason is not None:
+            result["reason"] = reason
+        self._conn.execute("INSERT INTO incidents VALUES(?,?,?)",
+                           (observation["fill_id"], iid, _json({"event": observation, "result": result})))
+        self._append_execution_event(kind="reconcile", intent=intent, event=observation,
+            state=state, ts=observation["fill_ts"], suffix=observation["fill_id"],
+            previous=previous, reason=reason)
+        return result
+
+    def record_observed_fill(self, event, *, writer_id, writer_epoch):
+        """Account for an explicitly observed local fill; never generate one."""
+        observation = _observed_fill(event)
+        _identity(writer_id)
+        if type(writer_epoch) is not int or writer_epoch < 1:
+            raise StaleWriter("Explicit claimed writer epoch required")
+        iid = observation["intent_id"]
+        def record():
+            prev = self._check_writer(writer_id, writer_epoch)
+            state, intent = self._execution_row(iid)
+            for table in ("fills", "incidents"):  # fixed internal table names
+                row = self._conn.execute(f"SELECT payload FROM {table} WHERE fill_id=?",
+                                         (observation["fill_id"],)).fetchone()
+                if row:
+                    prior = json.loads(row[0])
+                    if prior["event"] != observation:
+                        raise DuplicateConflict("Conflicting duplicate fill identity")
+                    return prior["result"]
+            receipt = self._conn.execute("SELECT receipt FROM receipts WHERE intent_id=?", (iid,)).fetchone()
+            if receipt is None:
+                raise ClaimUnavailable("Durable local acceptance required before observing a fill")
+            if self._conn.execute("SELECT 1 FROM incidents LIMIT 1").fetchone():
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="unresolved_incident")
+            if state["status"] in ("CANCELLED", "FILLED"):
+                return self._record_execution_incident(iid, intent, state, observation, prev)
+            if _time(observation["fill_ts"]) < _time(json.loads(receipt[0])["accepted_at"]):
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="pre_acceptance")
+            count = self._conn.execute("SELECT count(*) FROM fills WHERE intent_id=?", (iid,)).fetchone()[0]
+            if count >= MAX_FILLS_PER_INTENT:
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="fill_limit")
+            try:
+                after = _fill_transition(state, intent, observation)
+            except DuplicateConflict:
+                reason = ("overfill" if Decimal(observation["delta_qty_btc"]) >
+                          Decimal(state["remaining_qty_btc"]) else "cumulative_mismatch")
+                return self._record_execution_incident(iid, intent, state, observation, prev, reason=reason)
+            try:
+                self._update_execution(iid, state, after)
+            except BudgetExceeded:
+                # _update_execution checks all conservation bounds before its first write.
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="accounting_limit")
+            result = {"status": after["status"], "intent_id": iid, "fill_id": observation["fill_id"]}
+            self._conn.execute("INSERT INTO fills VALUES(?,?,?)",
+                               (observation["fill_id"], iid, _json({"event": observation, "result": result})))
+            self._append_execution_event(kind="paper_fill", intent=intent, event=observation,
+                state=after, ts=observation["fill_ts"], suffix=observation["fill_id"], previous=prev)
+            return result
+        return self._transaction(record)
+
+    def request_cancel(self, intent_id, *, cancel_id, requested_at, writer_id, writer_epoch):
+        _identity(intent_id); _identity(cancel_id); _identity(writer_id); _time(requested_at)
+        if type(writer_epoch) is not int or writer_epoch < 1:
+            raise StaleWriter("Explicit claimed writer epoch required")
+        event = {"intent_id": intent_id, "cancel_id": cancel_id, "requested_at": requested_at}
+        def request():
+            prev = self._check_writer(writer_id, writer_epoch)
+            state, intent = self._execution_row(intent_id)
+            prior = self._conn.execute("SELECT payload FROM cancels WHERE intent_id=? AND kind='requested'",
+                                       (intent_id,)).fetchone()
+            if prior:
+                stored = json.loads(prior[0])
+                if stored["event"] != event:
+                    raise DuplicateConflict("Conflicting cancel request")
+                return stored["result"]
+            accepted_row = self._conn.execute("SELECT receipt FROM receipts WHERE intent_id=?", (intent_id,)).fetchone()
+            if accepted_row is None:
+                raise ClaimUnavailable("Durable local acceptance required for cancellation")
+            if _time(requested_at) < _time(json.loads(accepted_row[0])["accepted_at"]):
+                raise ClaimUnavailable("Cancellation request precedes local acceptance")
+            if state["status"] not in ("OPEN", "PARTIALLY_FILLED"):
+                raise ClaimUnavailable("Cannot request cancellation of terminal/pending intent")
+            after = {**state, "status": "CANCEL_PENDING", "cancel_id": cancel_id}
+            self._update_execution(intent_id, state, after)
+            result = {"status": "CANCEL_PENDING", "intent_id": intent_id, "cancel_id": cancel_id}
+            self._conn.execute("INSERT INTO cancels VALUES(?,?,?)",
+                               (intent_id, "requested", _json({"event": event, "result": result})))
+            self._append_execution_event(kind="cancel_requested", intent=intent, event=event,
+                state=after, ts=requested_at, suffix=cancel_id, previous=prev)
+            return result
+        return self._transaction(request)
+
+    def confirm_cancel(self, intent_id, *, cancel_id, confirmed_at, writer_id, writer_epoch):
+        _identity(intent_id); _identity(cancel_id); _identity(writer_id)
+        confirmed = _time(confirmed_at)
+        if type(writer_epoch) is not int or writer_epoch < 1:
+            raise StaleWriter("Explicit claimed writer epoch required")
+        event = {"intent_id": intent_id, "cancel_id": cancel_id, "confirmed_at": confirmed_at}
+        def confirm():
+            prev = self._check_writer(writer_id, writer_epoch)
+            state, intent = self._execution_row(intent_id)
+            prior = self._conn.execute("SELECT payload FROM cancels WHERE intent_id=? AND kind='confirmed'",
+                                       (intent_id,)).fetchone()
+            if prior:
+                stored = json.loads(prior[0])
+                if stored["event"] != event:
+                    raise DuplicateConflict("Conflicting cancel confirmation")
+                return stored["result"]
+            request_row = self._conn.execute("SELECT payload FROM cancels WHERE intent_id=? AND kind='requested'",
+                                             (intent_id,)).fetchone()
+            if not request_row or state["status"] != "CANCEL_PENDING":
+                raise ClaimUnavailable("Cancellation request is not pending")
+            if self._conn.execute("SELECT 1 FROM incidents LIMIT 1").fetchone():
+                raise ReconciliationRequired("Unresolved observed fill blocks cancellation release")
+            requested = json.loads(request_row[0])["event"]
+            if requested["cancel_id"] != cancel_id or _time(confirmed_at) < _time(requested["requested_at"]):
+                raise DuplicateConflict("Cancellation identity/chronology differs")
+            applied = self._conn.execute("SELECT payload FROM fills WHERE intent_id=? LIMIT ?",
+                                         (intent_id, MAX_FILLS_PER_INTENT + 1)).fetchall()
+            if len(applied) > MAX_FILLS_PER_INTENT:
+                raise PaperStorageError("Fill count exceeds storage bound")
+            if any(confirmed < _time(json.loads(row[0])["event"]["fill_ts"]) for row in applied):
+                raise DuplicateConflict("Cancellation confirmation precedes recorded fill timestamp")
+            after = {**state, "status": "CANCELLED" if Decimal(state["remaining_qty_btc"]) else "FILLED",
+                     "cancelled_qty_btc": state["remaining_qty_btc"], "remaining_qty_btc": "0",
+                     "cash_reserved_usdt": "0", "risk_reserved_usdt": "0"}
+            self._update_execution(intent_id, state, after)
+            result = {"status": after["status"], "intent_id": intent_id, "cancel_id": cancel_id}
+            self._conn.execute("INSERT INTO cancels VALUES(?,?,?)",
+                               (intent_id, "confirmed", _json({"event": event, "result": result})))
+            self._append_execution_event(kind="cancelled", intent=intent, event=event,
+                state=after, ts=confirmed_at, suffix=cancel_id, previous=prev)
+            return result
+        return self._transaction(confirm)
+
+    def execution_snapshot(self, intent_id, *, writer_id, writer_epoch):
+        _identity(intent_id)
+        def read():
+            state, _ = self._execution_row(intent_id)
+            actual_cash, actual_base, risk_filled = self._execution_meta()
+            global_cash = self._meta()[3]
+            with localcontext() as ctx:
+                ctx.prec = 50
+                available = _decimal_text(Decimal(actual_cash) - Decimal(global_cash))
+            return {**state, "intent_id": intent_id, "actual_cash_usdt": actual_cash,
+                    "actual_base_btc": actual_base, "portfolio_risk_filled_usdt": risk_filled,
+                    "available_cash_usdt": available}
+        return self._fenced_read(read, writer_id=writer_id, writer_epoch=writer_epoch)
+
+    def pending_incidents(self, *, writer_id, writer_epoch):
+        def read():
+            return [json.loads(row[0]) for row in self._conn.execute(
+                "SELECT payload FROM incidents ORDER BY rowid LIMIT ?", (MAX_INTENTS * MAX_INCIDENTS_PER_INTENT + 1,))]
+        return self._fenced_read(read, writer_id=writer_id, writer_epoch=writer_epoch)
