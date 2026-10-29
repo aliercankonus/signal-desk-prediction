@@ -189,17 +189,29 @@ def run_research(raw_dir, manifest, spec, *, started=None):
             row["label_status"] = status
             row["label_direction"] = direction
 
+    def expire_obsolete(at):
+        # Strict inequalities retain events exactly on either window boundary.
+        while flow and flow[0][0] < at - timedelta(seconds=30):
+            flow.popleft()
+        while history and history[0][0] < at - timedelta(seconds=65):
+            history.popleft()
+
+    def check_window_caps():
+        for name, buffer in (("history", history), ("flow", flow)):
+            if len(buffer) > limits["max_window_events"]:
+                raise ResearchError(
+                    f"Rolling research {name} event cap reached: "
+                    f"size={len(buffer)}, cap={limits['max_window_events']}, "
+                    f"first_at={buffer[0][0].isoformat().replace('+00:00', 'Z')}, "
+                    f"last_at={buffer[-1][0].isoformat().replace('+00:00', 'Z')}")
+
     def predict(at):
         if pipeline is None:
             raise ResearchError("No synchronized ordered session")
         if time.monotonic() > deadline:
             raise ResearchError("Research runtime budget exhausted")
-        while flow and flow[0][0] < at - timedelta(seconds=30):
-            flow.popleft()
-        while history and history[0][0] < at - timedelta(seconds=65):
-            history.popleft()
-        if len(flow) > limits["max_window_events"] or len(history) > limits["max_window_events"]:
-            raise ResearchError("Rolling research window event cap reached")
+        expire_obsolete(at)
+        check_window_caps()
         quote = quote_value(last_snapshot) if last_snapshot is not None else None
         quality = ("warmup" if at < first_at + timedelta(seconds=60) else
                    "book_or_bridge" if quote is None or not pipeline.bridged else
@@ -269,6 +281,9 @@ def run_research(raw_dir, manifest, spec, *, started=None):
         while tick < at:
             predict(tick)
             tick += timedelta(seconds=30)
+        # A transition may fall between ticks; expire before checking its new
+        # state, without dropping anything needed by earlier predictions.
+        expire_obsolete(at)
         for item in tuple(waiting):
             if item["due"] < at:
                 finish(item)
@@ -297,8 +312,7 @@ def run_research(raw_dir, manifest, spec, *, started=None):
             if at <= item["due"]:
                 item.update(quote=quote, depth_at=last_depth, trade_at=last_trade,
                             bridged=pipeline.bridged)
-        if len(flow) > limits["max_window_events"] or len(history) > limits["max_window_events"]:
-            raise ResearchError("Rolling research window event cap reached")
+        check_window_caps()
     if tick is not None and tick <= last_at:
         predict(tick)
     for item in waiting:

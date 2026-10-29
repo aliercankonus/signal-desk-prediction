@@ -72,6 +72,24 @@ def fixture(tmp_path, times=(0, 1, 2, 30, 30, 60, 60, 90, 90, 120, 120,
     return raw, manifest, spec, rows
 
 
+def test_burst_older_than_both_windows_does_not_false_trip_event_cap(tmp_path):
+    # At t=60 the previous tick cannot drop t=0 history (65-second retention).
+    # At t=66, the next transition must expire it before checking the cap.
+    raw, manifest, spec, _ = fixture(tmp_path, times=(0,) * 20_000 + (66,))
+    rows = run_research(raw, manifest, spec)
+    assert {row["prediction_at"] for row in rows} == {
+        "2026-10-28T00:00:30Z", "2026-10-28T00:01:00Z"}
+    assert len(rows) == 2 * len(spec["candidates"]) * len(spec["horizons_seconds"])
+
+
+def test_required_rolling_window_over_cap_names_buffer_size_and_span(tmp_path):
+    raw, manifest, spec, _ = fixture(tmp_path, times=(0,) * 20_001)
+    with pytest.raises(ResearchError, match=(
+        r"Rolling research history event cap reached: size=20001, cap=20000, "
+        r"first_at=2026-10-28T00:00:00Z, last_at=2026-10-28T00:00:00Z")):
+        run_research(raw, manifest, spec)
+
+
 def test_common_grid_and_warmup_keep_invalid_rows(tmp_path):
     raw, manifest, spec, _ = fixture(tmp_path)
     results = run_research(raw, manifest, spec)
