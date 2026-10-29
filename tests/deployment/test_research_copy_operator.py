@@ -17,6 +17,27 @@ REQUIRED = (
 )
 
 
+def test_documented_staging_stops_before_separately_authorized_invocation():
+    """Inspect documented commands only; never execute the host staging block."""
+    text = (ROOT / "docs/RESEARCH_COPY_EXTRACTION_REVIEW.md").read_text()
+    section = text.split("## Proposed root-terminal staging and invocation (not run here)", 1)[1]
+    section = section.split("\n## ", 1)[0]
+    blocks = re.findall(r"(?m)^```bash\n(.*?)^```\s*$", section, re.S | re.M)
+    assert len(blocks) == 2, "staging and invocation must be separate fenced Bash blocks"
+    staging, invocation = blocks
+    command = 'bash "$STAGE/vps-research-copy-extract.sh"'
+    assert command not in staging
+    assert staging.count('bash -n "$STAGE/vps-research-copy-extract.sh"') == 1
+    assert "compile(path.read_bytes(), str(path), 'exec')" in staging
+    assert re.search(r'(?m)^printf .*staged only; procedure not run', staging)
+    assert staging.rstrip().endswith('"$STAGE"')
+    invocation_step = section.index('### Separate invocation — only after operator authorization')
+    assert invocation_step < section.index('```bash', invocation_step)
+    assert invocation.count(command) == 1
+    assert 'operator-verified-exclusive-writer-control-and-source-idle' in section
+    assert 'build log and provenance digest' in section
+
+
 def test_shell_parses_and_required_inputs_fail_before_any_side_effect(tmp_path):
     assert subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True).returncode == 0
     bin_dir = tmp_path / "bin"

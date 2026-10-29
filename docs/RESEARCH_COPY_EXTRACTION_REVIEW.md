@@ -74,13 +74,14 @@ an adversarial host-writer sandbox.
 The root operator must first obtain the **merge commit of this reviewed PR**
 and the SHA-256 of the three committed review artifacts (script, evidence gate,
 and output gate). A draft head is not an approved/merged execution source. The
-following block is a template: every `RESEARCH_*` value and `REVIEWED_*` hash
-comes from the private operator record;
-no placeholders are approved values. The operator must independently verify the
-trusted repository origin and the installed guard, read the whole script, and
-ensure each selected root-only directory is outside current and replacement
-agent mounts *before creating anything*. A separate explicit operator approval
-is required before running the final `bash` line.
+staging block below is a template: every `RESEARCH_*` value and `REVIEWED_*`
+hash comes from the private operator record; no placeholders are approved
+values. The operator must independently verify the trusted repository origin
+and the installed guard, read the whole script, and ensure each selected
+root-only directory is outside current and replacement agent mounts *before
+creating anything*. The root operator must establish exclusive writer control
+and keep the source idle through staging and any later invocation. Staging
+alone does not authorize running the procedure.
 
 ```bash
 # Trusted root terminal ONLY; do not paste placeholder values or run this PR.
@@ -174,12 +175,28 @@ for name in ('research_copy_gates.py', 'research_output_gates.py',
     path = pathlib.Path(sys.argv[1]) / name
     compile(path.read_bytes(), str(path), 'exec')
 PY
-# STOP: review exact staged bytes and obtain separate authorization.
-# If authorized in the same trusted root terminal, preserving the exports:
+printf 'staged only; procedure not run: %s\n' "$STAGE"
+```
+
+### Separate invocation — only after operator authorization
+
+**STOP after staging.** Review the exact staged bytes and private inputs, and
+obtain separate, explicit operator authorization. The root operator must retain
+exclusive writer control and a source-idle interval through the entire run;
+the earlier process/FD checks are snapshots, not a writer lock. Only after
+operator authorization, in the **same trusted root terminal** with `STAGE` and
+the validated exports still set, may the operator invoke the reviewed script.
+Its interactive build-provenance review remains a separate pause *before*
+extraction; authorization here does not preapprove the built image.
+
+```bash
+# Run only after separate operator authorization; never as part of staging.
+[[ $RESEARCH_SOURCE_IDLE_CONFIRMED == operator-verified-exclusive-writer-control-and-source-idle ]]
+[[ -n ${STAGE:-} && -f $STAGE/vps-research-copy-extract.sh ]]
 bash "$STAGE/vps-research-copy-extract.sh"
 ```
 
-`REVIEWED_MERGE_SHA`, both reviewed file hashes and protected paths are
+`REVIEWED_MERGE_SHA`, all three reviewed file hashes and protected paths are
 **unresolved until a future merge and operator inspection**. Stage the reviewed
 helper beside the script; do not fetch `main` or use a mutable branch in its
 place. The script must use a separate root-protected checkout at the pinned
