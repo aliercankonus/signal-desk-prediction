@@ -48,6 +48,145 @@ def claim(ledger, epoch, *, version=1, claim_id="claim-1", when=0, writer="write
         claimed_at=at(when), writer_id=writer, writer_epoch=epoch)
 
 
+def timed_reserved(tmp_path):
+    """Synthetic distinct signal-validity and intent-wait deadlines."""
+    path = tmp_path / "paper.sqlite3"
+    ledger = PaperLedger.create(path, cash_usdt="100", risk_budget_usdt="5")
+    epoch = ledger.claim_writer("writer-A", expected_epoch=0)
+    spec = replace(request(), valid_until=at(30), expires_at=at(60))
+    intent = ledger.reserve(spec, writer_id="writer-A", writer_epoch=epoch)
+    return path, ledger, epoch, intent
+
+
+@pytest.mark.parametrize("when", [-10, 30, 40])
+def test_new_claim_rejects_before_creation_and_at_or_after_signal_deadline(tmp_path, when):
+    path, ledger, epoch, intent = timed_reserved(tmp_path)
+    with pytest.raises(ClaimUnavailable):
+        claim(ledger, epoch, when=when, intent_id=intent["intent_id"])
+    assert ledger.reconcile_receipt(intent["intent_id"], writer_id="writer-A", writer_epoch=epoch) is None
+    assert ledger.snapshot()["cash_reserved_usdt"] == "21"
+    ledger.close()
+    reopened = PaperLedger.open(path)
+    assert len(reopened.ledger_entries(writer_id="writer-A", writer_epoch=epoch)) == 2
+    reopened.close()
+
+
+@pytest.mark.parametrize("when", [0, 29])
+def test_claim_and_local_acceptance_at_valid_chronology_boundaries(tmp_path, when):
+    path, ledger, epoch, intent = timed_reserved(tmp_path)
+    envelope = claim(ledger, epoch, when=when, intent_id=intent["intent_id"])
+    with LocalPaperReceiver(path) as receiver:
+        receipt = receiver.accept(envelope, accepted_at=at(when))
+    assert receipt["intent_id"] == intent["intent_id"]
+    ledger.close()
+    recovered = PaperLedger.open(path)
+    assert recovered.reconcile_receipt(intent["intent_id"], writer_id="writer-A", writer_epoch=epoch) == receipt
+    recovered.close()
+
+
+def test_new_acceptance_rejects_at_and_after_signal_deadline_inside_lease(tmp_path):
+    path, ledger, epoch, intent = timed_reserved(tmp_path)
+    envelope = claim(ledger, epoch, when=20, intent_id=intent["intent_id"])
+    with LocalPaperReceiver(path) as receiver:
+        for accepted_when in (30, 41):
+            with pytest.raises(ClaimUnavailable):
+                receiver.accept(envelope, accepted_at=at(accepted_when))
+    assert ledger.reconcile_receipt(intent["intent_id"], writer_id="writer-A", writer_epoch=epoch) is None
+    assert ledger.snapshot()["risk_reserved_usdt"] == "2"
+    ledger.close()
+
+
+def test_late_reconciliation_ack_and_identical_delivery_keep_durable_receipt(tmp_path):
+    path, ledger, epoch, intent = timed_reserved(tmp_path)
+    envelope = claim(ledger, epoch, when=29, intent_id=intent["intent_id"])
+    with LocalPaperReceiver(path) as receiver:
+        receipt = receiver.accept(envelope, accepted_at=at(29))
+        assert receiver.accept(envelope, accepted_at=at(90)) == receipt
+    ledger.close()
+    recovered = PaperLedger.open(path)
+    takeover = recovered.claim_writer("writer-B", expected_epoch=epoch)
+    assert recovered.reconcile_receipt(intent["intent_id"], writer_id="writer-B", writer_epoch=takeover) == receipt
+    with pytest.raises(ReceiptPending):
+        recovered.claim_outbox(intent["intent_id"], claim_id="claim-2", claim_version=2,
+            claimed_at=at(90), writer_id="writer-B", writer_epoch=takeover)
+    ack = recovered.ack_receipt(intent["intent_id"], receipt["receipt_id"],
+        acked_at=at(90), writer_id="writer-B", writer_epoch=takeover)
+    assert ack["kind"] == "ACCEPTANCE_ACK_NOT_FILL"
+    assert recovered.snapshot()["cash_reserved_usdt"] == "21"
+    recovered.close()
+    final = PaperLedger.open(path)
+    assert final.reconcile_receipt(intent["intent_id"], writer_id="writer-B", writer_epoch=takeover) == receipt
+    final.close()
+
+
+def seed_pre_fix_claim(ledger, epoch, intent, *, when):
+    """Persist a real-schema claim as a historical pre-fix writer could."""
+    payload = intent["outbox"]
+    envelope = {"intent_id": intent["intent_id"], "claim_id": "legacy-claim",
+                "claim_version": 1, "writer_id": "writer-A", "writer_epoch": epoch,
+                "claimed_at": at(when), "lease_until": at(when + 30), "payload": payload}
+    def persist():
+        prev = ledger._check_writer("writer-A", epoch)
+        ledger._conn.execute("INSERT INTO claims VALUES(?,?,?,?)",
+                             (intent["intent_id"], 1, "legacy-claim", json.dumps(envelope, sort_keys=True, separators=(",", ":"))))
+        ledger._append_dispatch_event(kind="outbox_claimed", intent=payload,
+            details=envelope, ts=at(when), suffix=1, previous=prev)
+    ledger._transaction(persist)
+    return envelope
+
+
+@pytest.mark.parametrize("claimed_when,accept_times", [(-10, (-9, 0)), (40, (41,))])
+def test_receiver_rejects_historical_invalid_claim_before_new_effect(tmp_path, claimed_when, accept_times):
+    path, ledger, epoch, intent = timed_reserved(tmp_path)
+    with LocalPaperReceiver(path) as receiver:
+        envelope = seed_pre_fix_claim(ledger, epoch, intent, when=claimed_when)
+        for when in accept_times:
+            with pytest.raises(ClaimUnavailable):
+                receiver.accept(envelope, accepted_at=at(when))
+    assert ledger.reconcile_receipt(intent["intent_id"], writer_id="writer-A", writer_epoch=epoch) is None
+    assert ledger.snapshot()["risk_reserved_usdt"] == "2"
+    ledger.close()
+
+
+@pytest.mark.parametrize("claimed_when", [-10, 40])
+def test_recovery_rejects_pre_fix_invalid_claim_without_receipt(tmp_path, claimed_when):
+    path, ledger, epoch, intent = timed_reserved(tmp_path)
+    seed_pre_fix_claim(ledger, epoch, intent, when=claimed_when)
+    ledger.close()
+    with pytest.raises(PaperStorageError, match="chronology"):
+        PaperLedger.open(path)
+
+
+@pytest.mark.parametrize("claimed_when,accepted_when", [(-10, -9), (40, 41)])
+def test_recovery_preserves_historical_invalid_time_receipt_for_ack(tmp_path, claimed_when, accepted_when):
+    path, ledger, epoch, intent = timed_reserved(tmp_path)
+    envelope = seed_pre_fix_claim(ledger, epoch, intent, when=claimed_when)
+    receipt = {"receipt_id": "rcpt_" + intent["intent_id"], "intent_id": intent["intent_id"],
+               "claim_id": envelope["claim_id"], "claim_version": 1,
+               "fingerprint": envelope["payload"]["fingerprint"],
+               "accepted_at": at(accepted_when), "kind": "ACCEPTED_NOT_FILLED", "paper_only": True}
+    def persist_receipt():
+        prev = ledger._check_writer("writer-A", epoch)
+        ledger._conn.execute("INSERT INTO receipts VALUES(?,?)",
+                             (intent["intent_id"], json.dumps(receipt, sort_keys=True, separators=(",", ":"))))
+        ledger._append_dispatch_event(kind="local_accepted", intent=envelope["payload"],
+            details=receipt, ts=at(accepted_when), suffix=1, previous=prev)
+    ledger._transaction(persist_receipt)
+    ledger.close()
+    with LocalPaperReceiver(path) as receiver:
+        assert receiver.accept(envelope, accepted_at=at(90)) == receipt
+    recovered = PaperLedger.open(path)
+    new_epoch = recovered.claim_writer("writer-B", expected_epoch=epoch)
+    assert recovered.reconcile_receipt(intent["intent_id"], writer_id="writer-B", writer_epoch=new_epoch) == receipt
+    assert recovered.ack_receipt(intent["intent_id"], receipt["receipt_id"],
+        acked_at=at(90), writer_id="writer-B", writer_epoch=new_epoch)["kind"] == "ACCEPTANCE_ACK_NOT_FILL"
+    assert recovered.snapshot()["cash_reserved_usdt"] == "21"
+    recovered.close()
+    final = PaperLedger.open(path)
+    assert final.reconcile_receipt(intent["intent_id"], writer_id="writer-B", writer_epoch=new_epoch) == receipt
+    final.close()
+
+
 def test_local_acceptance_ack_is_not_fill_and_keeps_reservation(tmp_path):
     path, ledger, epoch, intent = reserved(tmp_path)
     envelope = claim(ledger, epoch)

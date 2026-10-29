@@ -445,6 +445,12 @@ class PaperLedger:
                 or expected[number - 1].get("lease_until") !=
                     (_time(expected[number - 1]["claimed_at"]) + timedelta(seconds=LEASE_SECONDS)).isoformat().replace("+00:00", "Z")):
                 raise PaperStorageError("Claim differs from ledger or intent")
+            # An unreceipted pre-fix claim cannot authorize a new effect. Keep a
+            # self-consistent historical receipt recoverable for later ACK.
+            claimed = _time(expected[number - 1]["claimed_at"])
+            if iid not in receipts and (claimed < _time(created[iid]["created_ts"]) or
+                                        claimed >= _time(created[iid]["valid_until"])):
+                raise PaperStorageError("Unreceipted claim chronology outside signal validity")
         receipt_rows = self._conn.execute("SELECT intent_id,receipt FROM receipts LIMIT ?",
                                           (MAX_INTENTS + 1,)).fetchall()
         ack_rows = self._conn.execute("SELECT intent_id,ack FROM acks LIMIT ?",
@@ -675,6 +681,8 @@ class PaperLedger:
                         "lease_until": lease_until, "payload": payload}
             if len(_json(envelope).encode("ascii")) > MAX_RECORD_BYTES:
                 raise ClaimUnavailable("Claim envelope exceeds record bound")
+            if claimed < _time(payload["created_ts"]) or claimed >= _time(payload["valid_until"]):
+                raise ClaimUnavailable("Claim outside intent creation and signal validity window")
             prior = self._conn.execute("SELECT claim_version,envelope FROM claims WHERE intent_id=? "
                 "ORDER BY claim_version DESC LIMIT 1", (intent_id,)).fetchone()
             if prior and claim_version == prior[0]:
@@ -737,10 +745,14 @@ class PaperLedger:
                 if receipt["claim_id"] != envelope["claim_id"] or receipt["claim_version"] != envelope["claim_version"]:
                     raise DuplicateConflict("Conflicting duplicate local acceptance")
                 return receipt
-            if (accepted < _time(envelope["claimed_at"]) or
+            if (accepted < _time(payload["created_ts"]) or
+                accepted >= _time(payload["valid_until"]) or
+                _time(envelope["claimed_at"]) < _time(payload["created_ts"]) or
+                _time(envelope["claimed_at"]) >= _time(payload["valid_until"]) or
+                accepted < _time(envelope["claimed_at"]) or
                 accepted >= _time(envelope["lease_until"]) or
                 accepted > _time(payload["expires_at"])):
-                raise ClaimUnavailable("Expired or future-dated claim; no new local effect")
+                raise ClaimUnavailable("Claim outside signal validity, lease or intent waiting window")
             receipt = {"receipt_id": "rcpt_" + iid, "intent_id": iid,
                        "claim_id": envelope["claim_id"],
                        "claim_version": envelope["claim_version"],
