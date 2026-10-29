@@ -8,6 +8,7 @@ verify the ledger before explicitly claiming a new writer epoch.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
@@ -21,6 +22,9 @@ from signal_desk.schemas.validate import validate_json
 
 SCHEMAS = Path(__file__).resolve().parents[3] / "schemas"
 MAX_INTENTS = 2048
+MAX_CLAIMS_PER_INTENT = 4
+LEASE_SECONDS = 30
+MAX_LEDGER_ENTRIES = (2 + MAX_CLAIMS_PER_INTENT + 2) * MAX_INTENTS
 MAX_RECORD_BYTES = 4096
 MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_WAL_BYTES = 4 * 1024 * 1024
@@ -37,6 +41,15 @@ REQUIRED_TRIGGERS = {
     "reservation_no_delete": "CREATE TRIGGER reservation_no_delete BEFORE DELETE ON reservations BEGIN SELECT RAISE(ABORT, 'unresolved reservation'); END",
     "outbox_no_delete": "CREATE TRIGGER outbox_no_delete BEFORE DELETE ON outbox BEGIN SELECT RAISE(ABORT, 'unresolved outbox'); END",
 }
+LEGACY_TRIGGERS = REQUIRED_TRIGGERS.copy()
+REQUIRED_TRIGGERS.update({
+    "claims_no_update": "CREATE TRIGGER claims_no_update BEFORE UPDATE ON claims BEGIN SELECT RAISE(ABORT, 'immutable claim'); END",
+    "claims_no_delete": "CREATE TRIGGER claims_no_delete BEFORE DELETE ON claims BEGIN SELECT RAISE(ABORT, 'immutable claim'); END",
+    "receipts_no_update": "CREATE TRIGGER receipts_no_update BEFORE UPDATE ON receipts BEGIN SELECT RAISE(ABORT, 'immutable receipt'); END",
+    "receipts_no_delete": "CREATE TRIGGER receipts_no_delete BEFORE DELETE ON receipts BEGIN SELECT RAISE(ABORT, 'immutable receipt'); END",
+    "acks_no_update": "CREATE TRIGGER acks_no_update BEFORE UPDATE ON acks BEGIN SELECT RAISE(ABORT, 'immutable ack'); END",
+    "acks_no_delete": "CREATE TRIGGER acks_no_delete BEFORE DELETE ON acks BEGIN SELECT RAISE(ABORT, 'immutable ack'); END",
+})
 
 
 class PaperStorageError(RuntimeError):
@@ -61,6 +74,12 @@ class StalePortfolio(ValueError):
 
 class BudgetExceeded(ValueError):
     """The proposed reservation exceeds available synthetic paper budgets."""
+
+class ClaimUnavailable(ValueError):
+    """The claim is busy, expired, exhausted or not the active claim."""
+
+class ReceiptPending(ValueError):
+    """A local acceptance receipt must be reconciled, not delivered again."""
 
 
 @dataclass(frozen=True)
@@ -180,8 +199,9 @@ def _prepared(request):
 
 
 class PaperLedger:
-    def __init__(self, path, *, initial=None):
+    def __init__(self, path, *, initial=None, allow_legacy=False):
         self.path = Path(path).absolute()
+        self._allow_legacy = allow_legacy
         self._halted = False
         self._closed = False
         if self.path == Path(":memory:").absolute() or self.path.is_symlink():
@@ -229,6 +249,25 @@ class PaperLedger:
     def open(cls, path):
         return cls(path)
 
+    @classmethod
+    def migrate_v1(cls, path):
+        """Explicit atomic v1-to-v2 migration; never alter an unverified DB."""
+        store = cls(path, allow_legacy=True)
+        try:
+            if store._meta()[0] != 1:
+                raise PaperStorageError("Only verified schema v1 can be migrated")
+            def migrate():
+                store._verify_recovery_snapshot()
+                store._install_dispatch_tables()
+                for name, sql in REQUIRED_TRIGGERS.items():
+                    if name not in LEGACY_TRIGGERS:
+                        store._conn.execute(sql)
+                store._conn.execute("UPDATE meta SET schema_version=2 WHERE id=1")
+            store._transaction(migrate)
+        finally:
+            store.close()
+        return cls.open(path)
+
     def close(self):
         if not self._closed:
             self._conn.close()
@@ -260,15 +299,26 @@ class PaperLedger:
             CREATE TABLE ledger (seq INTEGER PRIMARY KEY AUTOINCREMENT, ledger_id TEXT NOT NULL UNIQUE,
                 payload TEXT NOT NULL, hash TEXT NOT NULL, prev_hash TEXT);
         """)
+        self._install_dispatch_tables()
         for sql in REQUIRED_TRIGGERS.values():
             self._conn.execute(sql)
-        self._conn.execute("INSERT INTO meta VALUES(1,1,?,?, '0','0',0,0,NULL,NULL)", (cash, risk))
+        self._conn.execute("INSERT INTO meta VALUES(1,2,?,?, '0','0',0,0,NULL,NULL)", (cash, risk))
         self._conn.commit()
+
+    def _install_dispatch_tables(self):
+        self._conn.execute("CREATE TABLE claims (intent_id TEXT NOT NULL REFERENCES outbox(intent_id),"
+            "claim_version INTEGER NOT NULL CHECK(claim_version BETWEEN 1 AND 4),"
+            "claim_id TEXT NOT NULL UNIQUE, envelope TEXT NOT NULL,"
+            "PRIMARY KEY(intent_id,claim_version))")
+        self._conn.execute("CREATE TABLE receipts (intent_id TEXT PRIMARY KEY REFERENCES outbox(intent_id),"
+            "receipt TEXT NOT NULL)")
+        self._conn.execute("CREATE TABLE acks (intent_id TEXT PRIMARY KEY REFERENCES receipts(intent_id),"
+            "ack TEXT NOT NULL)")
 
     def _meta(self):
         row = self._conn.execute("SELECT schema_version,initial_cash,risk_budget,cash_reserved,"
             "risk_reserved,portfolio_version,writer_epoch,writer_id,last_hash FROM meta WHERE id=1").fetchone()
-        if row is None or row[0] != 1:
+        if row is None or row[0] not in (1, 2):
             raise PaperStorageError("Missing or unsupported paper ledger metadata")
         return row
 
@@ -288,7 +338,8 @@ class PaperLedger:
     def _verify_triggers(self):
         actual_triggers = dict(self._conn.execute(
             "SELECT name,sql FROM sqlite_master WHERE type='trigger'"))
-        if actual_triggers != REQUIRED_TRIGGERS:
+        expected = LEGACY_TRIGGERS if self._meta()[0] == 1 else REQUIRED_TRIGGERS
+        if actual_triggers != expected:
             raise PaperStorageError("Missing or altered append-only trigger")
 
     def _verify_recovery_snapshot(self):
@@ -297,12 +348,17 @@ class PaperLedger:
         if type(version) is not int or not 0 <= version <= MAX_INTENTS or type(epoch) is not int or epoch < 0:
             raise PaperStorageError("Invalid paper ledger version or writer fence")
         rows = self._conn.execute("SELECT payload,hash,prev_hash FROM ledger ORDER BY seq LIMIT ?",
-                                  (2 * MAX_INTENTS + 1,)).fetchall()
-        if len(rows) != 2 * version:
+                                  (MAX_LEDGER_ENTRIES + 1,)).fetchall()
+        if schema == 1 and len(rows) != 2 * version:
             raise PaperStorageError("Ledger entry count does not match portfolio version")
+        if schema == 2 and (len(rows) < 2 * version or len(rows) > MAX_LEDGER_ENTRIES):
+            raise PaperStorageError("Ledger entry count exceeds dispatch bound")
         previous = None
         created = {}
         reserved = {}
+        claims = {}
+        receipts = {}
+        acks = {}
         for text,digest,prev in rows:
             if len(text.encode("utf-8")) > MAX_RECORD_BYTES or prev != previous:
                 raise PaperStorageError("Ledger chain or record bound failed")
@@ -315,6 +371,29 @@ class PaperLedger:
                 created[iid] = item["intent"]
             elif item["entry_type"] == "risk_reserved" and iid in created and iid not in reserved:
                 reserved[iid] = item["amounts"]
+            elif (schema == 2 and item["entry_type"] == "outbox_claimed" and
+                  iid in reserved and iid not in receipts and iid not in acks):
+                envelope = item.get("dispatch")
+                prior_claims = claims.setdefault(iid, [])
+                if (not isinstance(envelope, dict) or len(prior_claims) >= MAX_CLAIMS_PER_INTENT
+                    or envelope.get("intent_id") != iid
+                    or envelope.get("claim_version") != len(prior_claims) + 1
+                    or item["ts"] != envelope.get("claimed_at")):
+                    raise PaperStorageError("Invalid claim ledger event")
+                prior_claims.append(envelope)
+            elif schema == 2 and item["entry_type"] == "local_accepted" and iid in claims and iid not in receipts:
+                receipt = item.get("dispatch")
+                if (not isinstance(receipt, dict) or receipt.get("intent_id") != iid
+                    or item["ts"] != receipt.get("accepted_at")):
+                    raise PaperStorageError("Invalid local acceptance ledger event")
+                receipts[iid] = receipt
+            elif schema == 2 and item["entry_type"] == "outbox_acked" and iid in receipts and iid not in acks:
+                ack = item.get("dispatch")
+                if (not isinstance(ack, dict) or ack.get("intent_id") != iid
+                    or ack.get("receipt_id") != receipts[iid].get("receipt_id")
+                    or item["ts"] != ack.get("acked_at")):
+                    raise PaperStorageError("Invalid acceptance ACK ledger event")
+                acks[iid] = ack
             else:
                 raise PaperStorageError("Unexpected ledger event sequence")
             previous = digest
@@ -344,6 +423,59 @@ class PaperLedger:
             if (observed_cash != Decimal(cash_total) or observed_risk != Decimal(risk_total)
                 or observed_cash > Decimal(cash) or observed_risk > Decimal(budget)):
                 raise PaperStorageError("Reserved budgets differ from ledger")
+        if schema == 2:
+            self._verify_dispatch_state(version, created, claims, receipts, acks, len(rows))
+        elif not self._allow_legacy:
+            raise PaperStorageError("Schema v1 requires explicit PaperLedger.migrate_v1(path)")
+
+    def _verify_dispatch_state(self, version, created, claims, receipts, acks, entry_count):
+        total_claims = sum(map(len, claims.values()))
+        if entry_count != 2 * version + total_claims + len(receipts) + len(acks):
+            raise PaperStorageError("Dispatch ledger count mismatch")
+        claim_rows = self._conn.execute(
+            "SELECT intent_id,claim_version,claim_id,envelope FROM claims ORDER BY intent_id,claim_version LIMIT ?",
+            (MAX_INTENTS * MAX_CLAIMS_PER_INTENT + 1,)).fetchall()
+        if len(claim_rows) != total_claims:
+            raise PaperStorageError("Claim count differs from ledger")
+        for iid, number, claim_id, text in claim_rows:
+            expected = claims.get(iid, [])
+            if (number < 1 or number > len(expected) or text != _json(expected[number - 1])
+                or claim_id != expected[number - 1].get("claim_id")
+                or expected[number - 1].get("payload") != created.get(iid)
+                or expected[number - 1].get("lease_until") !=
+                    (_time(expected[number - 1]["claimed_at"]) + timedelta(seconds=LEASE_SECONDS)).isoformat().replace("+00:00", "Z")):
+                raise PaperStorageError("Claim differs from ledger or intent")
+            # An unreceipted pre-fix claim cannot authorize a new effect. Keep a
+            # self-consistent historical receipt recoverable for later ACK.
+            claimed = _time(expected[number - 1]["claimed_at"])
+            if iid not in receipts and (claimed < _time(created[iid]["created_ts"]) or
+                                        claimed >= _time(created[iid]["valid_until"])):
+                raise PaperStorageError("Unreceipted claim chronology outside signal validity")
+        receipt_rows = self._conn.execute("SELECT intent_id,receipt FROM receipts LIMIT ?",
+                                          (MAX_INTENTS + 1,)).fetchall()
+        ack_rows = self._conn.execute("SELECT intent_id,ack FROM acks LIMIT ?",
+                                      (MAX_INTENTS + 1,)).fetchall()
+        if len(receipt_rows) != len(receipts) or len(ack_rows) != len(acks):
+            raise PaperStorageError("Receipt or ACK count differs from ledger")
+        for iid, text in receipt_rows:
+            receipt = receipts.get(iid)
+            prior = claims.get(iid, [])
+            if (receipt is None or text != _json(receipt) or not prior or
+                prior[-1]["claim_id"] != receipt.get("claim_id") or
+                prior[-1]["claim_version"] != receipt.get("claim_version") or
+                not _time(prior[-1]["claimed_at"]) <= _time(receipt["accepted_at"]) < _time(prior[-1]["lease_until"]) or
+                _time(receipt["accepted_at"]) > _time(created[iid]["expires_at"]) or
+                receipt.get("fingerprint") != created[iid]["fingerprint"] or
+                receipt.get("kind") != "ACCEPTED_NOT_FILLED" or
+                receipt.get("paper_only") is not True):
+                raise PaperStorageError("Local acceptance differs from claim/intent ledger")
+        for iid, text in ack_rows:
+            ack = acks.get(iid)
+            if (ack is None or text != _json(ack) or ack.get("kind") != "ACCEPTANCE_ACK_NOT_FILL"
+                or ack.get("paper_only") is not True or
+                ack.get("receipt_id") != receipts[iid]["receipt_id"] or
+                _time(ack["acked_at"]) < _time(receipts[iid]["accepted_at"])):
+                raise PaperStorageError("ACK differs from acceptance ledger")
 
     def _ready(self):
         if self._closed or self._halted:
@@ -439,6 +571,9 @@ class PaperLedger:
                     raise DuplicateConflict("Conflicting duplicate stable intent ID")
                 return {"intent_id": intent["intent_id"], "duplicate": True,
                         "outbox": json.loads(row[1])}
+            if self._conn.execute("SELECT 1 FROM receipts LEFT JOIN acks USING(intent_id) "
+                                  "WHERE acks.intent_id IS NULL LIMIT 1").fetchone():
+                raise ReceiptPending("Reconcile local acceptance before admitting new risk")
             if request.portfolio_version != version:
                 raise StalePortfolio("Portfolio version changed")
             if version >= MAX_INTENTS:
@@ -491,12 +626,179 @@ class PaperLedger:
     def pending_outbox(self, *, writer_id, writer_epoch):
         def read_pending():
             return [json.loads(row[0]) for row in self._conn.execute(
-                "SELECT payload FROM outbox WHERE state='PENDING_SEND' ORDER BY rowid LIMIT ?",
-                (MAX_INTENTS + 1,))]
+                "SELECT payload FROM outbox WHERE NOT EXISTS "
+                "(SELECT 1 FROM receipts WHERE receipts.intent_id=outbox.intent_id) "
+                "ORDER BY outbox.rowid LIMIT ?", (MAX_INTENTS + 1,))]
         return self._fenced_read(read_pending, writer_id=writer_id, writer_epoch=writer_epoch)
 
     def ledger_entries(self, *, writer_id, writer_epoch):
         def read_entries():
             return [json.loads(row[0]) for row in self._conn.execute(
-                "SELECT payload FROM ledger ORDER BY seq LIMIT ?", (2 * MAX_INTENTS + 1,))]
+                "SELECT payload FROM ledger ORDER BY seq LIMIT ?", (MAX_LEDGER_ENTRIES + 1,))]
         return self._fenced_read(read_entries, writer_id=writer_id, writer_epoch=writer_epoch)
+
+    def _check_writer(self, writer_id, writer_epoch):
+        _, _, _, _, _, _, epoch, writer, prev = self._meta()
+        if writer != writer_id or epoch != writer_epoch:
+            raise StaleWriter("Local writer fence changed")
+        return prev
+
+    def _append_dispatch_event(self, *, kind, intent, details, ts, suffix, previous):
+        entry = {"ledger_id": "led_" + intent["intent_id"] + "_" + kind + "_" + str(suffix),
+                 "ts": ts, "entry_type": kind, "symbol": "BTCUSDT",
+                 "config_version": intent["config_version"], "intent_id": intent["intent_id"],
+                 "amounts": {}, "dispatch": details, "prev_hash": previous}
+        entry["hash"] = _digest(entry)
+        validate_json(entry, "ledger_entry.schema.json", SCHEMAS)
+        encoded = _json(entry)
+        if len(encoded.encode("ascii")) > MAX_RECORD_BYTES:
+            raise PaperStorageError("Dispatch ledger record exceeds storage bound")
+        self._conn.execute("INSERT INTO ledger(ledger_id,payload,hash,prev_hash) VALUES(?,?,?,?)",
+                           (entry["ledger_id"], encoded, entry["hash"], previous))
+        self._conn.execute("UPDATE meta SET last_hash=? WHERE id=1", (entry["hash"],))
+
+    def claim_outbox(self, intent_id, *, claim_id, claim_version, claimed_at,
+                     writer_id, writer_epoch):
+        _identity(intent_id); _identity(claim_id); _identity(writer_id)
+        claimed = _time(claimed_at)
+        if (type(writer_epoch) is not int or writer_epoch < 1 or
+            type(claim_version) is not int or not 1 <= claim_version <= MAX_CLAIMS_PER_INTENT):
+            raise ClaimUnavailable("Bounded claim version and writer epoch required")
+        def claim():
+            prev = self._check_writer(writer_id, writer_epoch)
+            row = self._conn.execute("SELECT payload FROM outbox WHERE intent_id=?", (intent_id,)).fetchone()
+            if row is None:
+                raise ClaimUnavailable("Unknown committed intent")
+            payload = json.loads(row[0])
+            if self._conn.execute("SELECT 1 FROM acks WHERE intent_id=?", (intent_id,)).fetchone():
+                raise ClaimUnavailable("Acceptance already ACKed")
+            if self._conn.execute("SELECT 1 FROM receipts WHERE intent_id=?", (intent_id,)).fetchone():
+                raise ReceiptPending("Reconcile existing local receipt before retry")
+            lease_until = (claimed + timedelta(seconds=LEASE_SECONDS)).isoformat().replace("+00:00", "Z")
+            envelope = {"intent_id": intent_id, "claim_id": claim_id,
+                        "claim_version": claim_version, "writer_id": writer_id,
+                        "writer_epoch": writer_epoch, "claimed_at": claimed_at,
+                        "lease_until": lease_until, "payload": payload}
+            if len(_json(envelope).encode("ascii")) > MAX_RECORD_BYTES:
+                raise ClaimUnavailable("Claim envelope exceeds record bound")
+            if claimed < _time(payload["created_ts"]) or claimed >= _time(payload["valid_until"]):
+                raise ClaimUnavailable("Claim outside intent creation and signal validity window")
+            prior = self._conn.execute("SELECT claim_version,envelope FROM claims WHERE intent_id=? "
+                "ORDER BY claim_version DESC LIMIT 1", (intent_id,)).fetchone()
+            if prior and claim_version == prior[0]:
+                if prior[1] != _json(envelope):
+                    raise DuplicateConflict("Conflicting duplicate claim version")
+                return envelope
+            if claim_version != (prior[0] + 1 if prior else 1):
+                raise ClaimUnavailable("Claim version must advance by one")
+            if self._conn.execute("SELECT 1 FROM claims WHERE claim_id=?", (claim_id,)).fetchone():
+                raise DuplicateConflict("Claim identity already used")
+            if claimed > _time(payload["expires_at"]):
+                raise ClaimUnavailable("Intent waiting deadline passed")
+            if prior and (claimed < _time(json.loads(prior[1])["claimed_at"]) or
+                          (json.loads(prior[1])["writer_epoch"] == writer_epoch and
+                           claimed < _time(json.loads(prior[1])["lease_until"]))):
+                raise ClaimUnavailable("Active claim lease; expiry is not proof of delivery failure")
+            # The receipt absence and writer fence are rechecked under the same
+            # BEGIN IMMEDIATE transaction as this durable claim.
+            self._conn.execute("INSERT INTO claims VALUES(?,?,?,?)",
+                               (intent_id, claim_version, claim_id, _json(envelope)))
+            self._append_dispatch_event(kind="outbox_claimed", intent=payload,
+                details=envelope, ts=claimed_at, suffix=claim_version, previous=prev)
+            return envelope
+        return self._transaction(claim)
+
+    def accept_local(self, envelope, *, accepted_at):
+        """Local receiver boundary: validate the current fence before any effect."""
+        accepted = _time(accepted_at)
+        if type(envelope) is not dict or len(_json(envelope).encode("ascii")) > MAX_RECORD_BYTES:
+            raise ValueError("Bounded local-paper claim envelope required")
+        if set(envelope) != {"intent_id", "claim_id", "claim_version", "writer_id",
+                             "writer_epoch", "claimed_at", "lease_until", "payload"}:
+            raise ValueError("Invalid local claim envelope fields")
+        iid = _identity(envelope["intent_id"])
+        _identity(envelope["claim_id"]); _identity(envelope["writer_id"])
+        _time(envelope["claimed_at"]); _time(envelope["lease_until"])
+        if (type(envelope["writer_epoch"]) is not int or envelope["writer_epoch"] < 1 or
+            type(envelope["claim_version"]) is not int or
+            not 1 <= envelope["claim_version"] <= MAX_CLAIMS_PER_INTENT):
+            raise ClaimUnavailable("Invalid claimed writer epoch or version")
+        def accept():
+            prev = self._check_writer(envelope["writer_id"], envelope["writer_epoch"])
+            row = self._conn.execute("SELECT payload FROM outbox WHERE intent_id=?", (iid,)).fetchone()
+            if row is None:
+                raise ClaimUnavailable("Unknown committed intent")
+            payload = json.loads(row[0])
+            if envelope["payload"] != payload:
+                raise DuplicateConflict("Conflicting local payload for stable intent")
+            stored = self._conn.execute("SELECT envelope FROM claims WHERE intent_id=? AND claim_version=?",
+                                        (iid, envelope["claim_version"])).fetchone()
+            if stored is None or stored[0] != _json(envelope):
+                raise DuplicateConflict("Claim identity or content differs from persisted claim")
+            latest = self._conn.execute("SELECT max(claim_version) FROM claims WHERE intent_id=?",
+                                        (iid,)).fetchone()[0]
+            if latest != envelope["claim_version"]:
+                raise ClaimUnavailable("Superseded local claim")
+            prior = self._conn.execute("SELECT receipt FROM receipts WHERE intent_id=?", (iid,)).fetchone()
+            if prior is not None:
+                receipt = json.loads(prior[0])
+                if receipt["claim_id"] != envelope["claim_id"] or receipt["claim_version"] != envelope["claim_version"]:
+                    raise DuplicateConflict("Conflicting duplicate local acceptance")
+                return receipt
+            if (accepted < _time(payload["created_ts"]) or
+                accepted >= _time(payload["valid_until"]) or
+                _time(envelope["claimed_at"]) < _time(payload["created_ts"]) or
+                _time(envelope["claimed_at"]) >= _time(payload["valid_until"]) or
+                accepted < _time(envelope["claimed_at"]) or
+                accepted >= _time(envelope["lease_until"]) or
+                accepted > _time(payload["expires_at"])):
+                raise ClaimUnavailable("Claim outside signal validity, lease or intent waiting window")
+            receipt = {"receipt_id": "rcpt_" + iid, "intent_id": iid,
+                       "claim_id": envelope["claim_id"],
+                       "claim_version": envelope["claim_version"],
+                       "fingerprint": payload["fingerprint"],
+                       "accepted_at": accepted_at, "kind": "ACCEPTED_NOT_FILLED", "paper_only": True}
+            self._conn.execute("INSERT INTO receipts VALUES(?,?)", (iid, _json(receipt)))
+            self._append_dispatch_event(kind="local_accepted", intent=payload,
+                details=receipt, ts=accepted_at, suffix=1, previous=prev)
+            return receipt
+        return self._transaction(accept)
+
+    def reconcile_receipt(self, intent_id, *, writer_id, writer_epoch):
+        _identity(intent_id)
+        def read():
+            row = self._conn.execute("SELECT receipt FROM receipts WHERE intent_id=?", (intent_id,)).fetchone()
+            return json.loads(row[0]) if row else None
+        return self._fenced_read(read, writer_id=writer_id, writer_epoch=writer_epoch)
+
+    def ack_receipt(self, intent_id, receipt_id, *, acked_at, writer_id, writer_epoch):
+        _identity(intent_id); _identity(receipt_id); _identity(writer_id)
+        acked = _time(acked_at)
+        if type(writer_epoch) is not int or writer_epoch < 1:
+            raise StaleWriter("Claimed writer epoch required")
+        def ack():
+            prev = self._check_writer(writer_id, writer_epoch)
+            row = self._conn.execute("SELECT receipt FROM receipts WHERE intent_id=?", (intent_id,)).fetchone()
+            if row is None:
+                raise ClaimUnavailable("No persisted local acceptance to ACK")
+            receipt = json.loads(row[0])
+            if receipt["receipt_id"] != receipt_id:
+                raise DuplicateConflict("Receipt identity conflicts with persisted acceptance")
+            ack_record = {"intent_id": intent_id, "receipt_id": receipt_id,
+                          "acked_at": acked_at, "kind": "ACCEPTANCE_ACK_NOT_FILL",
+                          "paper_only": True}
+            prior = self._conn.execute("SELECT ack FROM acks WHERE intent_id=?", (intent_id,)).fetchone()
+            if prior is not None:
+                existing = json.loads(prior[0])
+                if existing["receipt_id"] != receipt_id:
+                    raise DuplicateConflict("Conflicting duplicate acceptance ACK")
+                return existing
+            if acked < _time(receipt["accepted_at"]):
+                raise ValueError("ACK cannot precede local acceptance")
+            payload = json.loads(self._conn.execute(
+                "SELECT payload FROM outbox WHERE intent_id=?", (intent_id,)).fetchone()[0])
+            self._conn.execute("INSERT INTO acks VALUES(?,?)", (intent_id, _json(ack_record)))
+            self._append_dispatch_event(kind="outbox_acked", intent=payload,
+                details=ack_record, ts=acked_at, suffix=1, previous=prev)
+            return ack_record
+        return self._transaction(ack)
