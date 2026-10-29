@@ -492,6 +492,8 @@ class PaperLedger:
         receipts = {}
         acks = {}
         execution_events = {}
+        seen_incident = False
+        incident_barrier = False
         for text,digest,prev in rows:
             if len(text.encode("utf-8")) > MAX_RECORD_BYTES or prev != previous:
                 raise PaperStorageError("Ledger chain or record bound failed")
@@ -500,6 +502,8 @@ class PaperLedger:
                 raise PaperStorageError("Ledger hash mismatch")
             validate_json(item, "ledger_entry.schema.json", SCHEMAS)
             iid = item["intent_id"]
+            if incident_barrier and item["entry_type"] in ("risk_reserved", "paper_fill", "cancelled"):
+                raise PaperStorageError("Risk, fill or cancellation release after unresolved incident")
             if item["entry_type"] == "intent_created" and iid not in created:
                 created[iid] = item["intent"]
             elif item["entry_type"] == "risk_reserved" and iid in created and iid not in reserved:
@@ -533,11 +537,21 @@ class PaperLedger:
                 if (not isinstance(detail, dict) or not isinstance(detail.get("event"), dict)
                     or not isinstance(detail.get("state_after"), dict)
                     or detail["event"].get("intent_id") != iid
+                    or (item["entry_type"] != "reconcile" and "reason" in detail)
+                    or (detail.get("reason") == "unresolved_incident" and not seen_incident)
+                    or (item["entry_type"] == "reconcile" and "reason" in detail and
+                        seen_incident and detail["reason"] != "unresolved_incident")
+                    or (item["entry_type"] == "reconcile" and incident_barrier and
+                        detail.get("reason") != "unresolved_incident")
                     or item["ts"] != detail["event"].get(
                         "fill_ts" if item["entry_type"] in ("paper_fill", "reconcile") else
                         "requested_at" if item["entry_type"] == "cancel_requested" else "confirmed_at")):
                     raise PaperStorageError("Invalid execution ledger event")
                 execution_events.setdefault(iid, []).append((item["entry_type"], detail))
+                if item["entry_type"] == "reconcile":
+                    seen_incident = True
+                    if "reason" in detail:
+                        incident_barrier = True
             else:
                 raise PaperStorageError("Unexpected ledger event sequence")
             previous = digest
@@ -572,7 +586,7 @@ class PaperLedger:
             self._verify_dispatch_state(version, created, claims, receipts, acks, len(rows) - execution_count)
         if schema == 3:
             self._verify_execution_state(created, receipts, execution_events, cash, budget,
-                                         cash_total, risk_total, len(rows))
+                                         cash_total, risk_total, rows)
         elif not self._allow_legacy:
             raise PaperStorageError("Schema v1/v2 requires explicit PaperLedger.migrate_v1/v2(path)")
 
@@ -626,7 +640,7 @@ class PaperLedger:
                 raise PaperStorageError("ACK differs from acceptance ledger")
 
     def _verify_execution_state(self, created, receipts, events, cash, budget,
-                                cash_total, risk_total, entry_count):
+                                cash_total, risk_total, ledger_rows):
         expected_fills = {}; expected_cancels = {}; expected_incidents = {}; expected_states = {}
         with localcontext() as ctx:
             ctx.prec = 50
@@ -657,9 +671,29 @@ class PaperLedger:
                                 expected_fills[fid] = (iid, _json({"event": event, "result": result}))
                             else:
                                 incident_count += 1
-                                if incident_count > MAX_INCIDENTS_PER_INTENT or state["status"] not in ("CANCELLED", "FILLED"):
-                                    raise ValueError("Incident without terminal state or over bound")
+                                if incident_count > MAX_INCIDENTS_PER_INTENT:
+                                    raise ValueError("Incident bound")
+                                reason = detail.get("reason")
+                                terminal = state["status"] in ("CANCELLED", "FILLED")
+                                delta = Decimal(event["delta_qty_btc"])
+                                overfill = delta > Decimal(state["remaining_qty_btc"])
+                                mismatched = Decimal(state["filled_qty_btc"]) + delta != Decimal(event["cumulative_qty_btc"])
+                                early = _time(event["fill_ts"]) < _time(receipts[iid]["accepted_at"])
+                                if terminal:
+                                    if reason not in (None, "unresolved_incident"):
+                                        raise ValueError("Terminal incident reason differs")
+                                elif reason != "unresolved_incident":
+                                    expected_reason = (
+                                        "pre_acceptance" if early else
+                                        "fill_limit" if fill_count >= MAX_FILLS_PER_INTENT else
+                                        "overfill" if overfill else
+                                        "cumulative_mismatch" if mismatched else
+                                        "accounting_limit")
+                                    if reason != expected_reason:
+                                        raise ValueError("Incident reason or validation precedence differs")
                                 result = {"status": "RECONCILIATION_INCIDENT", "intent_id": iid, "fill_id": fid}
+                                if reason is not None:
+                                    result["reason"] = reason
                                 expected_incidents[fid] = (iid, _json({"event": event, "result": result}))
                         elif kind == "cancel_requested":
                             if (set(event) != {"intent_id", "cancel_id", "requested_at"} or
@@ -731,6 +765,67 @@ class PaperLedger:
         if len(cancel_rows) != len(expected_cancels) or any(
             expected_cancels.get((iid, kind)) != text for iid, kind, text in cancel_rows):
             raise PaperStorageError("Cancel history differs from ledger")
+        self._verify_execution_accounting_order(ledger_rows, created, expected_states, cash,
+                                                budget, cash_total, risk_total)
+
+    def _verify_execution_accounting_order(self, rows, created, expected_states,
+                                           cash, budget, cash_total, risk_total):
+        """Recheck cost incidents against the portfolio at their ledger position."""
+        with localcontext() as ctx:
+            ctx.prec = 50
+            actual = Decimal(cash)
+            reserved_cash = reserved_risk = filled_risk = Decimal(0)
+            states = {}
+
+            def candidate(before, after):
+                next_cash = actual - (Decimal(after["spent_usdt"]) - Decimal(before["spent_usdt"]))
+                next_reserved_cash = reserved_cash + Decimal(after["cash_reserved_usdt"]) - Decimal(before["cash_reserved_usdt"])
+                next_reserved_risk = reserved_risk + Decimal(after["risk_reserved_usdt"]) - Decimal(before["risk_reserved_usdt"])
+                next_filled_risk = filled_risk + Decimal(after["filled_risk_exposure_usdt"]) - Decimal(before["filled_risk_exposure_usdt"])
+                if (min(next_cash, next_reserved_cash, next_reserved_risk, next_filled_risk) < 0 or
+                    next_reserved_cash > next_cash or next_reserved_risk + next_filled_risk > Decimal(budget)):
+                    raise BudgetExceeded("Execution accounting limit")
+                return next_cash, next_reserved_cash, next_reserved_risk, next_filled_risk
+
+            for text, _, _ in rows:
+                item = json.loads(text)
+                iid = item["intent_id"]
+                kind = item["entry_type"]
+                if kind == "risk_reserved":
+                    if iid in states:
+                        raise PaperStorageError("Repeated execution reservation")
+                    state = _initial_execution_state(created[iid])
+                    states[iid] = state
+                    reserved_cash += Decimal(state["cash_reserved_usdt"])
+                    reserved_risk += Decimal(state["risk_reserved_usdt"])
+                    if reserved_cash > actual or reserved_risk + filled_risk > Decimal(budget):
+                        raise PaperStorageError("Execution reservation chronology differs")
+                elif kind in ("paper_fill", "cancel_requested", "cancelled", "reconcile"):
+                    if iid not in states:
+                        raise PaperStorageError("Execution precedes reservation")
+                    detail = item["execution"]
+                    before = states[iid]
+                    if kind == "reconcile":
+                        if detail.get("reason") == "accounting_limit":
+                            after = _fill_transition(before, created[iid], detail["event"])
+                            try:
+                                candidate(before, after)
+                            except BudgetExceeded:
+                                pass
+                            else:
+                                raise PaperStorageError("Accounting incident had no limit violation")
+                        continue
+                    after = detail["state_after"]
+                    try:
+                        actual, reserved_cash, reserved_risk, filled_risk = candidate(before, after)
+                    except BudgetExceeded as exc:
+                        raise PaperStorageError("Applied execution violates accounting chronology") from exc
+                    states[iid] = after
+            if ({iid: _json(state) for iid, state in states.items()} != expected_states or
+                reserved_cash != Decimal(cash_total) or reserved_risk != Decimal(risk_total) or
+                (_decimal_text(actual), _decimal_text(filled_risk)) !=
+                    (self._execution_meta()[0], self._execution_meta()[2])):
+                raise PaperStorageError("Execution chronological portfolio differs from ledger")
 
     def _ready(self):
         if self._closed or self._halted:
@@ -1103,11 +1198,14 @@ class PaperLedger:
         self._conn.execute("UPDATE meta SET cash_reserved=?,risk_reserved=? WHERE id=1",
                            (_decimal_text(reserve_next), _decimal_text(risk_next)))
 
-    def _append_execution_event(self, *, kind, intent, event, state, ts, suffix, previous):
+    def _append_execution_event(self, *, kind, intent, event, state, ts, suffix, previous, reason=None):
+        execution = {"event": event, "state_after": state}
+        if reason is not None:
+            execution["reason"] = reason
         entry = {"ledger_id": "led_" + intent["intent_id"] + "_" + kind + "_" + suffix,
                  "ts": ts, "entry_type": kind, "symbol": "BTCUSDT",
                  "config_version": intent["config_version"], "intent_id": intent["intent_id"],
-                 "amounts": {}, "execution": {"event": event, "state_after": state},
+                 "amounts": {}, "execution": execution,
                  "prev_hash": previous}
         if kind in ("paper_fill", "reconcile"):
             entry["fill_id"] = event["fill_id"]
@@ -1119,6 +1217,21 @@ class PaperLedger:
         self._conn.execute("INSERT INTO ledger(ledger_id,payload,hash,prev_hash) VALUES(?,?,?,?)",
                            (entry["ledger_id"], encoded, entry["hash"], previous))
         self._conn.execute("UPDATE meta SET last_hash=? WHERE id=1", (entry["hash"],))
+
+    def _record_execution_incident(self, iid, intent, state, observation, previous, *, reason=None):
+        count = self._conn.execute("SELECT count(*) FROM incidents WHERE intent_id=?", (iid,)).fetchone()[0]
+        if count >= MAX_INCIDENTS_PER_INTENT:
+            raise PaperStorageError("Observed fill incident storage bound reached; admission halted")
+        result = {"status": "RECONCILIATION_INCIDENT", "intent_id": iid,
+                  "fill_id": observation["fill_id"]}
+        if reason is not None:
+            result["reason"] = reason
+        self._conn.execute("INSERT INTO incidents VALUES(?,?,?)",
+                           (observation["fill_id"], iid, _json({"event": observation, "result": result})))
+        self._append_execution_event(kind="reconcile", intent=intent, event=observation,
+            state=state, ts=observation["fill_ts"], suffix=observation["fill_id"],
+            previous=previous, reason=reason)
+        return result
 
     def record_observed_fill(self, event, *, writer_id, writer_epoch):
         """Account for an explicitly observed local fill; never generate one."""
@@ -1141,24 +1254,30 @@ class PaperLedger:
             receipt = self._conn.execute("SELECT receipt FROM receipts WHERE intent_id=?", (iid,)).fetchone()
             if receipt is None:
                 raise ClaimUnavailable("Durable local acceptance required before observing a fill")
+            if self._conn.execute("SELECT 1 FROM incidents LIMIT 1").fetchone():
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="unresolved_incident")
             if state["status"] in ("CANCELLED", "FILLED"):
-                count = self._conn.execute("SELECT count(*) FROM incidents WHERE intent_id=?", (iid,)).fetchone()[0]
-                if count >= MAX_INCIDENTS_PER_INTENT:
-                    raise PaperStorageError("Late correction incident storage bound reached")
-                result = {"status": "RECONCILIATION_INCIDENT", "intent_id": iid,
-                          "fill_id": observation["fill_id"]}
-                self._conn.execute("INSERT INTO incidents VALUES(?,?,?)",
-                                   (observation["fill_id"], iid, _json({"event": observation, "result": result})))
-                self._append_execution_event(kind="reconcile", intent=intent, event=observation,
-                    state=state, ts=observation["fill_ts"], suffix=observation["fill_id"], previous=prev)
-                return result
+                return self._record_execution_incident(iid, intent, state, observation, prev)
             if _time(observation["fill_ts"]) < _time(json.loads(receipt[0])["accepted_at"]):
-                raise ClaimUnavailable("Observed fill precedes local acceptance")
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="pre_acceptance")
             count = self._conn.execute("SELECT count(*) FROM fills WHERE intent_id=?", (iid,)).fetchone()[0]
             if count >= MAX_FILLS_PER_INTENT:
-                raise PaperStorageError("Observed fill storage bound reached")
-            after = _fill_transition(state, intent, observation)
-            self._update_execution(iid, state, after)
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="fill_limit")
+            try:
+                after = _fill_transition(state, intent, observation)
+            except DuplicateConflict:
+                reason = ("overfill" if Decimal(observation["delta_qty_btc"]) >
+                          Decimal(state["remaining_qty_btc"]) else "cumulative_mismatch")
+                return self._record_execution_incident(iid, intent, state, observation, prev, reason=reason)
+            try:
+                self._update_execution(iid, state, after)
+            except BudgetExceeded:
+                # _update_execution checks all conservation bounds before its first write.
+                return self._record_execution_incident(iid, intent, state, observation, prev,
+                                                       reason="accounting_limit")
             result = {"status": after["status"], "intent_id": iid, "fill_id": observation["fill_id"]}
             self._conn.execute("INSERT INTO fills VALUES(?,?,?)",
                                (observation["fill_id"], iid, _json({"event": observation, "result": result})))
@@ -1219,6 +1338,8 @@ class PaperLedger:
                                              (intent_id,)).fetchone()
             if not request_row or state["status"] != "CANCEL_PENDING":
                 raise ClaimUnavailable("Cancellation request is not pending")
+            if self._conn.execute("SELECT 1 FROM incidents LIMIT 1").fetchone():
+                raise ReconciliationRequired("Unresolved observed fill blocks cancellation release")
             requested = json.loads(request_row[0])["event"]
             if requested["cancel_id"] != cancel_id or _time(confirmed_at) < _time(requested["requested_at"]):
                 raise DuplicateConflict("Cancellation identity/chronology differs")
