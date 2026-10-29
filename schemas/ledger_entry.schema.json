@@ -23,6 +23,9 @@
       "enum": [
         "intent_created",
         "risk_reserved",
+        "outbox_claimed",
+        "local_accepted",
+        "outbox_acked",
         "paper_fill",
         "cancel_requested",
         "cancelled",
@@ -54,6 +57,10 @@
     "amounts": {
       "type": "object"
     },
+    "dispatch": {
+      "type": "object",
+      "description": "Paper-only claim, local acceptance or ACK; never a fill"
+    },
     "position_state_after": {
       "type": [
         "string",
@@ -69,5 +76,18 @@
         "null"
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "entry_type": {
+            "enum": ["outbox_claimed", "local_accepted", "outbox_acked"]
+          }
+        },
+        "required": ["entry_type"]
+      },
+      "then": {"required": ["dispatch"]}
+    }
+  ]
 }
