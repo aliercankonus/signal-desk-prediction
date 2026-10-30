@@ -28,10 +28,13 @@ def main(argv=None):
     parser.add_argument('--state', type=Path, required=True, help='private local directory outside the git checkout')
     parser.add_argument('--source', type=Path, help='development git checkout, required by once')
     parser.add_argument('--auth', type=Path, help='reviewed private task authorization record')
+    parser.add_argument('--context', type=Path, help='separate private reviewed interpreter/runner context')
     parser.add_argument('--execute-hermes', action='store_true', help='explicitly allow one real invocation')
     args = parser.parse_args(argv)
     if args.mode == 'once' and not args.auth:
         parser.error('once requires an independently reviewed --auth record; legacy bootstrap is not authority')
+    if args.mode == 'once' and not args.context:
+        parser.error('once requires a separate private --context record')
     try:
         policy = load_authorization(args.auth) if args.auth else None
     except (OSError, ValueError, PermissionError):
@@ -61,8 +64,13 @@ def main(argv=None):
     try:
         if args.auth.resolve() == state or state in args.auth.resolve().parents or source in args.auth.resolve().parents:
             parser.error('authorization must be separate from state and checkout')
+        if (args.context.resolve() == args.auth.resolve() or
+            args.context.resolve() == state or state in args.context.resolve().parents or
+            source in args.context.resolve().parents):
+            parser.error('execution context must be separate from authorization, state and checkout')
         result = Bridge(state, policy, GitHubREST(policy),
-                        HermesAgent(source, state, policy), auth_path=args.auth).once()
+                        HermesAgent(source, state, policy, context_path=args.context),
+                        auth_path=args.auth).once()
     except Exception:
         parser.exit(1, 'bridge blocked; inspect private state with doctor\n')
     print(json.dumps({key: result.get(key) for key in ('status', 'run_id', 'base', 'target_tip', 'head', 'pr_url', 'ci')}))
