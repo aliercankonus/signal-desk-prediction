@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from signal_desk.task_bridge.adapters import HermesAgent, GitHubREST
-from signal_desk.task_bridge.bridge import Policy
+from signal_desk.task_bridge.bridge import Policy, draft_title, draft_body
 
 
 POLICY = Policy("aliercankonus/signal-desk-prediction", 101, "a" * 64, "a930a3c715635341e62538a3cc15a260162f6be9", "review-task-101")
@@ -21,6 +21,213 @@ def inert_context(root, runner_commit):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_task_draft_post_requires_exact_remote_head_and_fixed_payload(self):
+        calls = []
+        remote = {'sha': 'e' * 40}
+        def request(method, path, payload=None):
+            calls.append((method, path, payload))
+            if path.endswith('/git/ref/heads/' + POLICY.branch):
+                return {'ref': 'refs/heads/' + POLICY.branch,
+                        'object': {'type': 'commit', 'sha': remote['sha']}}
+            if method == 'POST':
+                return {'number': 42}
+            raise AssertionError(path)
+        adapter = GitHubREST(POLICY, request=request)
+        with self.assertRaisesRegex(ValueError, 'remote|head'):
+            adapter.create_task_draft(POLICY.repo, POLICY.branch, 'f' * 40)
+        self.assertFalse(any(method == 'POST' for method, _, _ in calls))
+        remote['sha'] = 'f' * 40
+        self.assertEqual(adapter.create_task_draft(POLICY.repo, POLICY.branch, 'f' * 40), 42)
+        posts = [payload for method, _, payload in calls if method == 'POST']
+        self.assertEqual(posts, [{'title': draft_title(POLICY), 'body': draft_body(POLICY),
+                                  'head': POLICY.branch, 'base': 'main', 'draft': True,
+                                  'maintainer_can_modify': False}])
+        self.assertNotIn('/private/', str(posts))
+
+    def test_task_draft_reuses_only_single_exact_open_draft_after_readback(self):
+        head = 'f' * 40
+        url = 'https://github.com/aliercankonus/signal-desk-prediction/pull/42'
+        detail = {'number': 42, 'state': 'open', 'draft': True,
+                  'title': draft_title(POLICY), 'body': draft_body(POLICY), 'html_url': url,
+                  'head': {'sha': head, 'ref': POLICY.branch, 'repo': {'full_name': POLICY.repo}},
+                  'base': {'ref': 'main', 'repo': {'full_name': POLICY.repo}}}
+        candidates = [detail]
+        calls = []
+        def request(method, path, payload=None):
+            calls.append((method, path))
+            if path.endswith('/git/ref/heads/' + POLICY.branch):
+                return {'ref': 'refs/heads/' + POLICY.branch, 'object': {'type': 'commit', 'sha': head}}
+            if 'state=all' in path and '/pulls?' in path:
+                return candidates
+            if path.endswith('/pulls/42'):
+                return detail
+            raise AssertionError(path)
+        adapter = GitHubREST(POLICY, request=request)
+        adapter.draft_pr = lambda repo, branch: {
+            'number': 42, 'title': detail['title'], 'body': detail['body'],
+            'url': url, 'draft': True, 'head': head, 'target_branch': 'main',
+            'target_repo': POLICY.repo, 'pinned_start': POLICY.base,
+            'target_tip': 'd' * 40, 'ci_head': head, 'ci': 'unknown'}
+        self.assertEqual(adapter.task_draft(POLICY.repo, POLICY.branch, head)['target_tip'], 'd'*40)
+        self.assertTrue(all(method == 'GET' for method, _ in calls))
+        candidates.clear()
+        self.assertIsNone(adapter.task_draft(POLICY.repo, POLICY.branch, head))
+        candidates.extend([detail, detail.copy()])
+        with self.assertRaisesRegex(ValueError, 'multiple'):
+            adapter.task_draft(POLICY.repo, POLICY.branch, head)
+        candidates.pop()
+        for key, value in (('state', 'closed'), ('draft', False), ('title', 'issue prose'),
+                           ('body', 'Refs #101\nextra text')):
+            with self.subTest(key=key):
+                before = detail[key]
+                detail[key] = value
+                with self.assertRaisesRegex(ValueError, 'conflicting'):
+                    adapter.task_draft(POLICY.repo, POLICY.branch, head)
+                detail[key] = before
+        detail['head']['sha'] = 'e' * 40
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            adapter.task_draft(POLICY.repo, POLICY.branch, head)
+
+    def test_agent_rejects_missing_or_mismatched_remote_and_dirty_worktree(self):
+        for failure in ('absent', 'mismatch', 'dirty', 'branch'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                state = root / 'state'
+                state.mkdir(mode=0o700)
+                class Inert(HermesAgent):
+                    def execute(self, argv, timeout=630):
+                        return None
+                agent = Inert(root / 'source', state, POLICY,
+                              help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                              context_path=inert_context(root, POLICY.base),
+                              context_validator=lambda *args: args[0])
+                def git(args):
+                    if 'get-url' in args:
+                        return 'https://github.com/' + POLICY.repo + '.git'
+                    if 'cat-file' in args:
+                        return 'commit'
+                    if 'show-ref' in args:
+                        raise subprocess.CalledProcessError(1, args)
+                    if args[:2] == ['worktree', 'add']:
+                        Path(args[4]).mkdir(parents=True)
+                        return ''
+                    if 'symbolic-ref' in args:
+                        return 'other' if failure == 'branch' else POLICY.branch
+                    if 'status' in args:
+                        return '?? unexpected.txt' if failure == 'dirty' else ''
+                    if args[:2] == ['ls-remote', '--exit-code']:
+                        if failure == 'absent':
+                            raise subprocess.CalledProcessError(2, args)
+                        return ('e' if failure == 'mismatch' else 'f') * 40 + '\trefs/heads/' + POLICY.branch
+                    if 'rev-parse' in args:
+                        return 'f'*40 if args[-1] == 'HEAD' else POLICY.base
+                    return ''
+                agent.git_runner = git
+                with self.assertRaisesRegex(ValueError, 'pushed|clean|branch'):
+                    agent.run('synthetic', state / 'worktrees' / 'run')
+
+    def test_agent_rechecks_fixed_origin_after_child_before_remote_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / 'state'
+            state.mkdir(mode=0o700)
+            class Inert(HermesAgent):
+                def execute(self, argv, timeout=630):
+                    return None
+            agent = Inert(root / 'source', state, POLICY,
+                          help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                          context_path=inert_context(root, POLICY.base),
+                          context_validator=lambda *args: args[0])
+            reads = []
+            def git(args):
+                if 'get-url' in args:
+                    reads.append(args)
+                    return ('https://github.com/' + POLICY.repo + '.git' if len(reads) == 1
+                            else 'https://github.com/other/repo.git')
+                if 'cat-file' in args:
+                    return 'commit'
+                if 'show-ref' in args:
+                    raise subprocess.CalledProcessError(1, args)
+                if args[:2] == ['worktree', 'add']:
+                    Path(args[4]).mkdir(parents=True)
+                    return ''
+                if 'symbolic-ref' in args:
+                    return POLICY.branch
+                if args[:2] == ['ls-remote', '--exit-code']:
+                    self.fail('remote lookup reached after origin changed')
+                if 'rev-parse' in args:
+                    return 'f'*40 if args[-1] == 'HEAD' else POLICY.base
+                return ''
+            agent.git_runner = git
+            with self.assertRaisesRegex(ValueError, 'repository|origin'):
+                agent.run('synthetic', state / 'worktrees' / 'run')
+
+    def test_child_cannot_publish_pinned_start_without_a_new_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / 'state'
+            state.mkdir(mode=0o700)
+            class Inert(HermesAgent):
+                def execute(self, argv, timeout=630):
+                    return None
+            agent = Inert(root / 'source', state, POLICY,
+                          help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                          context_path=inert_context(root, POLICY.base),
+                          context_validator=lambda *args: args[0])
+            def git(args):
+                if 'get-url' in args:
+                    return 'https://github.com/' + POLICY.repo + '.git'
+                if 'cat-file' in args:
+                    return 'commit'
+                if 'show-ref' in args:
+                    raise subprocess.CalledProcessError(1, args)
+                if args[:2] == ['worktree', 'add']:
+                    Path(args[4]).mkdir(parents=True)
+                    return ''
+                if 'symbolic-ref' in args:
+                    return POLICY.branch
+                if args[:2] == ['ls-remote', '--exit-code']:
+                    return POLICY.base + '\trefs/heads/' + POLICY.branch
+                if 'rev-parse' in args:
+                    return POLICY.base
+                return ''
+            agent.git_runner = git
+            with self.assertRaisesRegex(ValueError, 'new commit|pinned start'):
+                agent.run('synthetic', state / 'worktrees' / 'run')
+
+    def test_child_cannot_publish_empty_commit_with_unchanged_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / 'state'
+            state.mkdir(mode=0o700)
+            class Inert(HermesAgent):
+                def execute(self, argv, timeout=630):
+                    return None
+            agent = Inert(root / 'source', state, POLICY,
+                          help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                          context_path=inert_context(root, POLICY.base),
+                          context_validator=lambda *args: args[0])
+            def git(args):
+                if 'get-url' in args:
+                    return 'https://github.com/' + POLICY.repo + '.git'
+                if 'cat-file' in args:
+                    return 'commit'
+                if 'show-ref' in args:
+                    raise subprocess.CalledProcessError(1, args)
+                if args[:2] == ['worktree', 'add']:
+                    Path(args[4]).mkdir(parents=True)
+                    return ''
+                if 'symbolic-ref' in args:
+                    return POLICY.branch
+                if args[:2] == ['ls-remote', '--exit-code']:
+                    return 'f'*40 + '\trefs/heads/' + POLICY.branch
+                if 'rev-parse' in args:
+                    return 'b'*40 if args[-1].endswith('^{tree}') else ('f'*40 if args[-1] == 'HEAD' else POLICY.base)
+                return ''
+            agent.git_runner = git
+            with self.assertRaisesRegex(ValueError, 'tree|artifact|changes'):
+                agent.run('synthetic', state / 'worktrees' / 'run')
+
     def test_adapters_reject_cross_task_issue_branch_and_missing_start(self):
         for number in (101, 102):
             policy = Policy(POLICY.repo, number, POLICY.body_digest, 'b' * 40,
@@ -173,11 +380,22 @@ class AdapterTests(unittest.TestCase):
             class Inert(HermesAgent):
                 def execute(self, argv, timeout=630):
                     calls.append(argv)
+                    (state / 'worktrees' / 'run' / 'synthetic.md').write_text('inert child edit\n')
+                    git('-C', str(state / 'worktrees' / 'run'), 'add', 'synthetic.md')
+                    git('-C', str(state / 'worktrees' / 'run'), '-c', 'user.name=synthetic',
+                        '-c', 'user.email=synthetic@example.invalid', 'commit',
+                        '-qm', 'inert child commit')
             agent = Inert(source, state, policy, help_runner=lambda: ' '.join(HermesAgent.FLAGS),
                           context_path=context, context_validator=lambda *a: a[0])
+            real_git = agent.git_runner
+            # The inert child cannot push; simulate only the remote-ref readback.
+            agent.git_runner = lambda args: (git('-C', str(state / 'worktrees' / 'run'), 'rev-parse', 'HEAD') +
+                                             '\trefs/heads/' + policy.branch
+                                             if args[:2] == ['ls-remote', '--exit-code'] else real_git(args))
             target = state / 'worktrees' / 'run'
             result = agent.run('untrusted issue prose: python=bare; echo DANGER', target)
-            self.assertEqual(result['head'], base)
+            self.assertNotEqual(result['head'], base)
+            self.assertEqual(result['head'], git('-C', str(target), 'rev-parse', 'HEAD'))
             self.assertEqual(len(calls), 1)
             handoff = state / 'execution-context.json'
             self.assertEqual(handoff.stat().st_mode & 0o777, 0o600)
@@ -524,6 +742,8 @@ class AdapterTests(unittest.TestCase):
                     raise subprocess.CalledProcessError(1, args)
                 if 'merge-base' in args:
                     raise subprocess.CalledProcessError(1, args)
+                if 'symbolic-ref' in args:
+                    return POLICY.branch
                 if args[:2] == ['worktree', 'add']:
                     Path(args[4]).mkdir(parents=True)
                 if 'rev-parse' in args:
@@ -552,7 +772,13 @@ class AdapterTests(unittest.TestCase):
                 if 'show-ref' in args:
                     raise subprocess.CalledProcessError(1, args)
                 if 'rev-parse' in args:
+                    if args[-1].endswith('^{tree}'):
+                        return ('f' if args[-1] == 'HEAD^{tree}' else 'a') * 40
                     return 'f' * 40 if args[-1] == 'HEAD' else 'a930a3c715635341e62538a3cc15a260162f6be9'
+                if 'symbolic-ref' in args:
+                    return POLICY.branch
+                if args[:2] == ['ls-remote', '--exit-code']:
+                    return 'f' * 40 + '\trefs/heads/' + POLICY.branch
                 if args[:2] == ['worktree', 'add']:
                     Path(args[4]).mkdir(parents=True)
                 calls.append(args)

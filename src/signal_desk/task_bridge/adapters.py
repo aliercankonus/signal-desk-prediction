@@ -4,10 +4,11 @@ import time
 import os
 import signal
 import json
+import re
 import urllib.request
 import urllib.parse
 from pathlib import Path
-from .bridge import Policy, REPO
+from .bridge import Policy, REPO, draft_title, draft_body
 from .context import (load_execution_context, validate_execution_context,
                       write_task_context, trusted_context_prompt)
 
@@ -77,11 +78,29 @@ class HermesAgent:
             output.flush()
             os.fsync(output.fileno())
         self.execute(self.command(prompt_path, path))
+        if self.git_runner(['remote', 'get-url', 'origin']) != 'https://github.com/' + self.policy.repo + '.git':
+            raise ValueError('source repository changed after child completion')
         head = self.git_runner(['-C', str(path), 'rev-parse', 'HEAD'])
+        if head == self.policy.base:
+            raise ValueError('child made no new commit from pinned start')
+        if self.git_runner(['-C', str(path), 'symbolic-ref', '--quiet', '--short', 'HEAD']) != self.policy.branch:
+            raise ValueError('task branch changed after child completion')
+        if self.git_runner(['-C', str(path), 'status', '--porcelain=v1', '-uall']):
+            raise ValueError('task worktree is not clean')
         try:
             self.git_runner(['-C', str(path), 'merge-base', '--is-ancestor', self.policy.base, head])
         except subprocess.SubprocessError:
             raise ValueError('result head is not descended from pinned base') from None
+        ref = 'refs/heads/' + self.policy.branch
+        try:
+            pushed = self.git_runner(['ls-remote', '--exit-code', '--heads', 'origin', ref])
+        except subprocess.SubprocessError:
+            raise ValueError('pushed task branch unavailable') from None
+        if pushed != head + '\t' + ref:
+            raise ValueError('pushed task branch differs from local result')
+        if (self.git_runner(['-C', str(path), 'rev-parse', 'HEAD^{tree}']) ==
+                self.git_runner(['-C', str(path), 'rev-parse', self.policy.base + '^{tree}'])):
+            raise ValueError('child commit tree has no artifact changes from pinned start')
         return {'branch': self.policy.branch, 'head': head}
 
     @staticmethod
@@ -242,10 +261,72 @@ class GitHubREST:
             ci_state = 'success'
         else:
             ci_state = 'pending'
-        return {'url': pr['html_url'], 'draft': True, 'head': head,
+        return {'url': pr['html_url'], 'number': pr.get('number'),
+                'title': pr.get('title'), 'draft': True, 'head': head,
                 'pinned_start': self.policy.base, 'target_branch': 'main',
                 'target_repo': self.REPO, 'target_tip': target_tip,
                 'body': pr.get('body') or '', 'ci_head': head, 'ci': ci_state}
+
+    def task_draft(self, repo, branch, head):
+        """Discover across all states; conflicting or ambiguous PRs block creation."""
+        path = self._path(repo)
+        if branch != self.policy.branch or not isinstance(head, str) or not re.fullmatch('[0-9a-f]{40}', head):
+            raise ValueError('draft lookup outside reviewed task')
+        if self.task_branch_head(repo, branch) != head:
+            raise ValueError('remote task head changed')
+        query = urllib.parse.urlencode({'state': 'all', 'head': 'aliercankonus:' + branch, 'per_page': 2})
+        candidates = self.request('GET', path + '/pulls?' + query)
+        if not isinstance(candidates, list) or len(candidates) > 2:
+            raise ValueError('draft candidate inspection invalid')
+        if not candidates:
+            return None
+        if len(candidates) != 1 or type(candidates[0].get('number')) is not int or candidates[0]['number'] < 1:
+            raise ValueError('multiple or invalid draft candidates')
+        number = candidates[0]['number']
+        detail = self.request('GET', path + '/pulls/' + str(number))
+        if (detail.get('number') != number or detail.get('state') != 'open' or
+            detail.get('draft') is not True or detail.get('title') != draft_title(self.policy) or
+            detail.get('body') != draft_body(self.policy) or
+            detail.get('head', {}).get('sha') != head or
+            detail.get('head', {}).get('ref') != branch or
+            detail.get('head', {}).get('repo', {}).get('full_name') != self.REPO or
+            detail.get('base', {}).get('ref') != 'main' or
+            detail.get('base', {}).get('repo', {}).get('full_name') != self.REPO):
+            raise ValueError('conflicting draft candidate')
+        observed = self.draft_pr(repo, branch)
+        if (observed is None or observed['number'] != number or observed['head'] != head or
+            observed['title'] != detail['title'] or observed['body'] != detail['body'] or
+            observed['url'] != detail.get('html_url')):
+            raise ValueError('draft readback mismatch')
+        return observed
+
+    def task_branch_head(self, repo, branch):
+        path = self._path(repo)
+        if branch != self.policy.branch:
+            raise ValueError('remote branch outside reviewed task')
+        ref = self.request('GET', path + '/git/ref/heads/' + branch)
+        sha = ref.get('object', {}).get('sha')
+        if (ref.get('ref') != 'refs/heads/' + branch or
+            ref.get('object', {}).get('type') != 'commit' or
+            not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{40}', sha)):
+            raise ValueError('remote task branch invalid')
+        return sha
+
+    def create_task_draft(self, repo, branch, head):
+        """Exactly one controlled POST per caller's durable intent; no retry here."""
+        path = self._path(repo)
+        if branch != self.policy.branch or not isinstance(head, str) or not re.fullmatch('[0-9a-f]{40}', head):
+            raise ValueError('draft creation outside reviewed task')
+        if self.task_branch_head(repo, branch) != head:
+            raise ValueError('remote task head changed before draft POST')
+        posted = self.request('POST', path + '/pulls',
+                              {'title': draft_title(self.policy), 'body': draft_body(self.policy),
+                               'head': branch, 'base': 'main', 'draft': True,
+                               'maintainer_can_modify': False})
+        number = posted.get('number')
+        if type(number) is not int or number < 1:
+            raise ValueError('draft POST response ambiguous')
+        return number
 
     def statuses(self, repo, number, run_id, expected):
         if (number != self.policy.issue or not isinstance(run_id, str) or len(run_id) != 32 or
