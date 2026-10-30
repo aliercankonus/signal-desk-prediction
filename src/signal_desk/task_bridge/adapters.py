@@ -7,15 +7,16 @@ import json
 import urllib.request
 import urllib.parse
 from pathlib import Path
-from .bridge import BASE
+from .bridge import Policy, REPO
 
 
 class HermesAgent:
     FLAGS = ('--query-file', '--oneshot', '--quiet', '--in', '--max-turns', '--run-budget')
 
-    def __init__(self, source, state, help_runner=None):
+    def __init__(self, source, state, policy: Policy, help_runner=None):
         self.source = source
         self.state = state
+        self.policy = policy
         self.help_runner = help_runner or self._installed_help
         self.git_runner = self._git
 
@@ -25,14 +26,22 @@ class HermesAgent:
 
     def preflight(self):
         self.check()
-        if self.git_runner(['remote', 'get-url', 'origin']) != 'https://github.com/aliercankonus/signal-desk-prediction.git':
+        if self.git_runner(['remote', 'get-url', 'origin']) != 'https://github.com/' + self.policy.repo + '.git':
             raise ValueError('source repository not allowed')
         try:
-            kind = self.git_runner(['cat-file', '-t', BASE])
+            kind = self.git_runner(['cat-file', '-t', self.policy.base])
         except subprocess.SubprocessError:
             raise ValueError('pinned base commit unavailable') from None
         if kind != 'commit':
             raise ValueError('pinned base commit unavailable')
+        # A pre-existing branch, including one in another worktree, is ambiguous.
+        try:
+            self.git_runner(['show-ref', '--verify', 'refs/heads/' + self.policy.branch])
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != 1:
+                raise
+        else:
+            raise ValueError('reviewed branch already exists')
         return True
 
     def run(self, prompt, worktree):
@@ -46,7 +55,7 @@ class HermesAgent:
         if path.parent.absolute() != parent.absolute():
             raise ValueError('worktree outside state directory')
         parent.mkdir(parents=True, exist_ok=True)
-        self.git_runner(['worktree', 'add', '-b', 'issue-22-bridge', str(path), BASE])
+        self.git_runner(['worktree', 'add', '-b', self.policy.branch, str(path), self.policy.base])
         prompt_path = Path(self.state) / 'prompt'
         fd = os.open(prompt_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w') as output:
@@ -56,10 +65,10 @@ class HermesAgent:
         self.execute(self.command(prompt_path, path))
         head = self.git_runner(['-C', str(path), 'rev-parse', 'HEAD'])
         try:
-            self.git_runner(['-C', str(path), 'merge-base', '--is-ancestor', BASE, head])
+            self.git_runner(['-C', str(path), 'merge-base', '--is-ancestor', self.policy.base, head])
         except subprocess.SubprocessError:
             raise ValueError('result head is not descended from pinned base') from None
-        return {'branch': 'issue-22-bridge', 'head': head}
+        return {'branch': self.policy.branch, 'head': head}
 
     @staticmethod
     def _installed_help():
@@ -118,7 +127,7 @@ class HermesAgent:
 
 
 class GitHubREST:
-    REPO = 'aliercankonus/signal-desk-prediction'
+    REPO = REPO
     MAX_RESPONSE = 131072
 
     @staticmethod
@@ -128,7 +137,8 @@ class GitHubREST:
             raise ValueError('GitHub response exceeds bound')
         return json.loads(content)
 
-    def __init__(self, request=None):
+    def __init__(self, policy: Policy, request=None):
+        self.policy = policy
         self.request = request or self._request
 
     def _path(self, repo):
@@ -157,14 +167,14 @@ class GitHubREST:
             return self._bounded_json(response)
 
     def issue(self, repo, number):
-        if number != 22:
+        if number != self.policy.issue:
             raise ValueError('issue not allowed')
-        item = self.request('GET', self._path(repo) + '/issues/22')
+        item = self.request('GET', self._path(repo) + '/issues/' + str(number))
         return {'repo': repo, 'number': item['number'], 'body': item['body'],
                 'state': item['state']}
 
     def draft_pr(self, repo, branch):
-        if branch != 'issue-22-bridge':
+        if branch != self.policy.branch:
             raise ValueError('branch not allowed')
         path = self._path(repo)
         query = urllib.parse.urlencode({'state': 'open', 'head': 'aliercankonus:' + branch, 'per_page': 2})
@@ -191,9 +201,9 @@ class GitHubREST:
             return None
         # Compare the immutable starting commit to the result head, not to the
         # moving branch tip. Both status and merge-base must support ancestry.
-        comparison = self.request('GET', path + '/compare/' + BASE + '...' + head)
+        comparison = self.request('GET', path + '/compare/' + self.policy.base + '...' + head)
         if (comparison.get('status') not in ('ahead', 'identical') or
-            comparison.get('merge_base_commit', {}).get('sha') != BASE):
+            comparison.get('merge_base_commit', {}).get('sha') != self.policy.base):
             return None
         checks = self.request('GET', path + '/commits/' + head + '/check-runs?per_page=100')
         workflows = self.request('GET', path + '/actions/runs?' + urllib.parse.urlencode(
@@ -219,12 +229,12 @@ class GitHubREST:
         else:
             ci_state = 'pending'
         return {'url': pr['html_url'], 'draft': True, 'head': head,
-                'pinned_start': BASE, 'target_branch': 'main',
+                'pinned_start': self.policy.base, 'target_branch': 'main',
                 'target_repo': self.REPO, 'target_tip': target_tip,
                 'body': pr.get('body') or '', 'ci_head': head, 'ci': ci_state}
 
     def statuses(self, repo, number, run_id, expected):
-        if (number != 22 or not isinstance(run_id, str) or len(run_id) != 32 or
+        if (number != self.policy.issue or not isinstance(run_id, str) or len(run_id) != 32 or
             not isinstance(expected, dict) or len(expected) > 4):
             raise ValueError('status lookup outside allowlist')
         path = self._path(repo)
@@ -233,7 +243,7 @@ class GitHubREST:
             raise ValueError('authenticated comment author unavailable')
         observed = []
         for page in range(1, 6):
-            rows = self.request('GET', path + '/issues/22/comments?' +
+            rows = self.request('GET', path + '/issues/' + str(number) + '/comments?' +
                                 urllib.parse.urlencode({'per_page': 100, 'page': page}))
             if not isinstance(rows, list) or len(rows) > 100:
                 raise ValueError('unbounded issue comments')
@@ -258,14 +268,14 @@ class GitHubREST:
         raise ValueError('issue comment history exceeds inspection bound')
 
     def publish(self, repo, number, text):
-        if number != 22 or len(text) > 2048:
+        if number != self.policy.issue or len(text) > 2048:
             raise ValueError('status outside bounds')
-        posted = self.request('POST', self._path(repo) + '/issues/22/comments', {'body': text})
+        posted = self.request('POST', self._path(repo) + '/issues/' + str(number) + '/comments', {'body': text})
         comment_id = posted.get('id')
         if not isinstance(comment_id, int) or comment_id < 1:
             raise RuntimeError('publication receipt missing')
         confirmed = self.request('GET', self._path(repo) + '/issues/comments/' + str(comment_id))
         if (confirmed.get('id') != comment_id or confirmed.get('body') != text or
-            confirmed.get('issue_url') != 'https://api.github.com' + self._path(repo) + '/issues/22'):
+            confirmed.get('issue_url') != 'https://api.github.com' + self._path(repo) + '/issues/' + str(number)):
             raise RuntimeError('publication verification failed')
         return comment_id

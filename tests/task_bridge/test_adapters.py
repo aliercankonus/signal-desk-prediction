@@ -6,23 +6,58 @@ import tempfile
 import unittest
 
 from signal_desk.task_bridge.adapters import HermesAgent, GitHubREST
+from signal_desk.task_bridge.bridge import Policy
+
+POLICY = Policy("aliercankonus/signal-desk-prediction", 101, "a" * 64, "a930a3c715635341e62538a3cc15a260162f6be9", "review-task-101")
 
 
 class AdapterTests(unittest.TestCase):
+    def test_adapters_reject_cross_task_issue_branch_and_missing_start(self):
+        for number in (101, 102):
+            policy = Policy(POLICY.repo, number, POLICY.body_digest, 'b' * 40,
+                            f'review-task-{number}')
+            calls = []
+            def request(method, path, payload=None):
+                calls.append((method, path))
+                return {'number': number, 'body': 'synthetic', 'state': 'open'}
+            gh = GitHubREST(policy, request=request)
+            self.assertEqual(gh.issue(policy.repo, number)['number'], number)
+            with self.assertRaises(ValueError):
+                gh.issue(policy.repo, 22)
+            with self.assertRaises(ValueError):
+                gh.draft_pr(policy.repo, 'review-task-other')
+            with self.assertRaises(ValueError):
+                gh.issue('other/repo', number)
+            self.assertEqual(len(calls), 1)
+            agent = HermesAgent('/source', '/state', policy,
+                                help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            agent.git_runner = lambda args: ('https://github.com/' + policy.repo + '.git'
+                                             if 'get-url' in args else 'missing')
+            with self.assertRaisesRegex(ValueError, 'pinned base'):
+                agent.preflight()
+
+    def test_preflight_rejects_existing_reviewed_branch(self):
+        agent = HermesAgent('/source', '/state', POLICY,
+                            help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+        agent.git_runner = lambda args: ('https://github.com/' + POLICY.repo + '.git'
+                                         if 'get-url' in args else 'commit')
+        with self.assertRaisesRegex(ValueError, 'branch already exists'):
+            agent.preflight()
+
     def test_help_verification_requires_all_bounded_flags(self):
         help_text = '--query-file PATH --oneshot --quiet --in DIR --max-turns N --run-budget SECONDS'
-        adapter = HermesAgent('/source', '/private', help_runner=lambda: help_text)
+        adapter = HermesAgent('/source', '/private', POLICY, help_runner=lambda: help_text)
         self.assertEqual(adapter.check(), True)
         self.assertEqual(adapter.command('/private/prompt', '/private/worktrees/run')[:2], ['hermes', 'chat'])
         with self.assertRaises(ValueError):
-            HermesAgent('/source', '/private', help_runner=lambda: '--oneshot').check()
+            HermesAgent('/source', '/private', POLICY, help_runner=lambda: '--oneshot').check()
     def test_timeout_kills_child_process_group(self):
         import sys
         with tempfile.TemporaryDirectory() as directory:
             pidfile = Path(directory) / 'child.pid'
             script = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
                       "open(sys.argv[1],'w').write(str(p.pid));time.sleep(30)")
-            adapter = HermesAgent('/source', directory, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = HermesAgent('/source', directory, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
             with self.assertRaises(TimeoutError):
                 adapter.execute([sys.executable, '-c', script, str(pidfile)], timeout=0.5)
             pid = int(pidfile.read_text())
@@ -48,7 +83,7 @@ class AdapterTests(unittest.TestCase):
                    return_value=SimpleNamespace(si_code=os.CLD_EXITED, si_status=0)), \
              patch('signal_desk.task_bridge.adapters.os.killpg',
                    side_effect=lambda pid, sig: events.append(('killpg', sig))):
-            HermesAgent('/source', '/state').execute(['/bin/true'], timeout=1)
+            HermesAgent('/source', '/state', POLICY).execute(['/bin/true'], timeout=1)
         self.assertTrue(events)
         self.assertEqual(events[0][0], 'killpg')
         self.assertIn(('killpg', signal.SIGKILL), events)
@@ -71,7 +106,7 @@ class AdapterTests(unittest.TestCase):
              patch('signal_desk.task_bridge.adapters.os.waitid',
                    return_value=SimpleNamespace(si_code=os.CLD_EXITED, si_status=0)), \
              patch('signal_desk.task_bridge.adapters.os.killpg', side_effect=group_signal):
-            HermesAgent('/source', '/state').execute(['/bin/true'], timeout=1)
+            HermesAgent('/source', '/state', POLICY).execute(['/bin/true'], timeout=1)
         self.assertEqual(events, [signal.SIGTERM, signal.SIGKILL, 'reap'])
 
     def test_sigterm_terminates_agent_process_group(self):
@@ -83,7 +118,7 @@ class AdapterTests(unittest.TestCase):
             agent_code = ("import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
                           "open(sys.argv[1],'w').write(str(p.pid));time.sleep(30)")
             supervisor = ("import sys; from signal_desk.task_bridge.adapters import HermesAgent;"
-                          "HermesAgent('/source','/state').execute([sys.executable,'-c',sys.argv[2],sys.argv[1]],timeout=25)")
+                          "HermesAgent('/source','/state',__import__('signal_desk.task_bridge.bridge',fromlist=['Policy']).Policy('aliercankonus/signal-desk-prediction',101,'a'*64,'a930a3c715635341e62538a3cc15a260162f6be9','review-task-101')).execute([sys.executable,'-c',sys.argv[2],sys.argv[1]],timeout=25)")
             proc = subprocess.Popen([sys.executable, '-c', supervisor, str(pidfile), agent_code],
                                     env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2] / 'src')},
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -115,7 +150,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_api_response_is_bounded_before_json_parse(self):
         import io
-        adapter = GitHubREST()
+        adapter = GitHubREST(POLICY)
         with self.assertRaisesRegex(ValueError, 'response'):
             adapter._bounded_json(io.BytesIO(b' ' * 131073))
         self.assertEqual(adapter._bounded_json(io.BytesIO(b'{"ok":true}')), {'ok': True})
@@ -124,11 +159,11 @@ class AdapterTests(unittest.TestCase):
         calls = []
         def request(method, path, payload=None):
             calls.append((method, path, payload))
-            if path.endswith('/issues/22'):
-                return {'number': 22, 'body': 'body', 'state': 'open'}
+            if path.endswith('/issues/101'):
+                return {'number': 101, 'body': 'body', 'state': 'open'}
             if '/pulls?' in path:
                 return [{'number': 42, 'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
-                         'draft': True, 'head': {'sha': 'f'*40, 'ref': 'issue-22-bridge',
+                         'draft': True, 'head': {'sha': 'f'*40, 'ref': 'review-task-101',
                                                   'repo': {'full_name': 'aliercankonus/signal-desk-prediction'}},
                          'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
                                   'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}}]
@@ -143,15 +178,15 @@ class AdapterTests(unittest.TestCase):
             if '/status' in path:
                 return {'sha': 'f'*40, 'state': 'success', 'statuses': [{'state': 'success'}]}
             if '/comments/99' in path:
-                return {'id': 99, 'body': 'safe status', 'issue_url': 'https://api.github.com/repos/aliercankonus/signal-desk-prediction/issues/22'}
+                return {'id': 99, 'body': 'safe status', 'issue_url': 'https://api.github.com/repos/aliercankonus/signal-desk-prediction/issues/101'}
             if method == 'POST':
                 return {'id': 99}
             return {}
-        gh = GitHubREST(request=request)
-        self.assertEqual(gh.issue('aliercankonus/signal-desk-prediction', 22)['body'], 'body')
-        pr = gh.draft_pr('aliercankonus/signal-desk-prediction', 'issue-22-bridge')
+        gh = GitHubREST(POLICY, request=request)
+        self.assertEqual(gh.issue('aliercankonus/signal-desk-prediction', 101)['body'], 'body')
+        pr = gh.draft_pr('aliercankonus/signal-desk-prediction', 'review-task-101')
         self.assertEqual(pr['ci_head'], 'f'*40)
-        gh.publish('aliercankonus/signal-desk-prediction', 22, 'safe status')
+        gh.publish('aliercankonus/signal-desk-prediction', 101, 'safe status')
         self.assertEqual(calls[-1], ('GET', '/repos/aliercankonus/signal-desk-prediction/issues/comments/99', None))
 
     def test_draft_pr_accepts_moving_main_tip_without_changing_pinned_start(self):
@@ -163,10 +198,10 @@ class AdapterTests(unittest.TestCase):
             paths.append(path)
             if '/pulls?' in path:
                 return [{'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
-                         'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
+                         'draft': True, 'head': {'sha': head, 'ref': 'review-task-101',
                                                   'repo': {'full_name': GitHubREST.REPO}},
                          'base': {'sha': start, 'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}},
-                         'body': 'Refs #22'}]
+                         'body': 'Refs #101'}]
             if '/git/ref/heads/main' in path:
                 return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': tip}}
             if '/compare/' in path:
@@ -178,7 +213,7 @@ class AdapterTests(unittest.TestCase):
             if '/status' in path:
                 return {'sha': head, 'statuses': []}
             raise AssertionError(path)
-        pr = GitHubREST(request=request).draft_pr(GitHubREST.REPO, 'issue-22-bridge')
+        pr = GitHubREST(POLICY, request=request).draft_pr(GitHubREST.REPO, 'review-task-101')
         self.assertIsNotNone(pr)
         self.assertEqual(pr['pinned_start'], start)
         self.assertEqual(pr['target_tip'], tip)
@@ -192,12 +227,12 @@ class AdapterTests(unittest.TestCase):
             def request(method, path, payload=None):
                 calls.append(path)
                 if '/pulls?' in path:
-                    return [{'draft': True, 'head': {'sha': 'f' * 40, 'ref': 'issue-22-bridge',
+                    return [{'draft': True, 'head': {'sha': 'f' * 40, 'ref': 'review-task-101',
                                                        'repo': {'full_name': GitHubREST.REPO}},
                              'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
                                       'ref': target_ref, 'repo': {'full_name': target_repo}}}]
                 raise AssertionError('invalid target should stop before compare: ' + path)
-            self.assertIsNone(GitHubREST(request=request).draft_pr(GitHubREST.REPO, 'issue-22-bridge'))
+            self.assertIsNone(GitHubREST(POLICY, request=request).draft_pr(GitHubREST.REPO, 'review-task-101'))
             self.assertEqual(len(calls), 1)
 
     def test_draft_pr_rejects_inconsistent_ancestry_evidence(self):
@@ -205,7 +240,7 @@ class AdapterTests(unittest.TestCase):
         head = 'f' * 40
         def request(method, path, payload=None):
             if '/pulls?' in path:
-                return [{'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
+                return [{'draft': True, 'head': {'sha': head, 'ref': 'review-task-101',
                                                    'repo': {'full_name': GitHubREST.REPO}},
                          'base': {'sha': start, 'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}}]
             if '/git/ref/heads/main' in path:
@@ -213,17 +248,17 @@ class AdapterTests(unittest.TestCase):
             if '/compare/' in path:
                 return {'status': 'ahead', 'merge_base_commit': {'sha': '0' * 40}}
             raise AssertionError('inconsistent comparison should stop: ' + path)
-        self.assertIsNone(GitHubREST(request=request).draft_pr(GitHubREST.REPO, 'issue-22-bridge'))
+        self.assertIsNone(GitHubREST(POLICY, request=request).draft_pr(GitHubREST.REPO, 'review-task-101'))
 
     def test_draft_pr_rejects_head_not_descended_from_pinned_base(self):
         head = 'e' * 40
         def request(method, path, payload=None):
             if '/pulls?' in path:
                 return [{'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
-                         'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
+                         'draft': True, 'head': {'sha': head, 'ref': 'review-task-101',
                                                   'repo': {'full_name': 'aliercankonus/signal-desk-prediction'}},
                          'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
-                                  'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}, 'body': 'Refs #22'}]
+                                  'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}, 'body': 'Refs #101'}]
             if '/git/ref/heads/main' in path:
                 return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': 'd' * 40}}
             if '/compare/' in path:
@@ -235,7 +270,7 @@ class AdapterTests(unittest.TestCase):
             if '/status' in path:
                 return {'sha': head, 'statuses': []}
             raise AssertionError(path)
-        self.assertIsNone(GitHubREST(request=request).draft_pr('aliercankonus/signal-desk-prediction', 'issue-22-bridge'))
+        self.assertIsNone(GitHubREST(POLICY, request=request).draft_pr('aliercankonus/signal-desk-prediction', 'review-task-101'))
 
     def test_exact_head_ci_prefers_check_runs_over_empty_legacy_status(self):
         head = 'e' * 40
@@ -244,10 +279,10 @@ class AdapterTests(unittest.TestCase):
             paths.append(path)
             if '/pulls?' in path:
                 return [{'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
-                         'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
+                         'draft': True, 'head': {'sha': head, 'ref': 'review-task-101',
                                                   'repo': {'full_name': 'aliercankonus/signal-desk-prediction'}},
                          'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
-                                  'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}, 'body': 'Refs #22'}]
+                                  'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}, 'body': 'Refs #101'}]
             if '/git/ref/heads/main' in path:
                 return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': 'd' * 40}}
             if '/compare/' in path:
@@ -261,13 +296,13 @@ class AdapterTests(unittest.TestCase):
             if '/status' in path:
                 return {'sha': head, 'state': 'pending', 'statuses': []}
             raise AssertionError(path)
-        pr = GitHubREST(request=request).draft_pr('aliercankonus/signal-desk-prediction', 'issue-22-bridge')
+        pr = GitHubREST(POLICY, request=request).draft_pr('aliercankonus/signal-desk-prediction', 'review-task-101')
         self.assertEqual(pr['ci'], 'success')
         self.assertTrue(any('/check-runs?' in path for path in paths))
         self.assertTrue(any('/actions/runs?' in path for path in paths))
 
     def test_preflight_requires_pinned_commit_object_not_literal_sha(self):
-        adapter = HermesAgent('/source', '/state', help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+        adapter = HermesAgent('/source', '/state', POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
         adapter.git_runner = lambda args: ('https://github.com/aliercankonus/signal-desk-prediction.git'
                                            if 'get-url' in args else 'missing')
         with self.assertRaisesRegex(ValueError, 'base|commit'):
@@ -275,7 +310,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_agent_rejects_wrong_source_repository_before_worktree(self):
         with tempfile.TemporaryDirectory() as directory:
-            adapter = HermesAgent('/source', directory, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = HermesAgent('/source', directory, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
             adapter.execute = lambda argv, timeout=630: None  # Never launch a real Hermes process in this test.
             calls = []
             def git(args):
@@ -293,10 +328,14 @@ class AdapterTests(unittest.TestCase):
             state.mkdir()
             outside.mkdir()
             (state / 'worktrees').symlink_to(outside, target_is_directory=True)
-            adapter = HermesAgent('/source', state, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = HermesAgent('/source', state, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
             adapter.execute = lambda argv, timeout=630: None  # Never launch a real Hermes process in this test.
-            adapter.git_runner = lambda args: ('https://github.com/aliercankonus/signal-desk-prediction.git' if 'get-url' in args else
-                                               'commit' if 'cat-file' in args else 'a930a3c715635341e62538a3cc15a260162f6be9')
+            def git(args):
+                if 'show-ref' in args:
+                    raise subprocess.CalledProcessError(1, args)
+                return ('https://github.com/aliercankonus/signal-desk-prediction.git' if 'get-url' in args else
+                        'commit' if 'cat-file' in args else POLICY.base)
+            adapter.git_runner = git
             with self.assertRaisesRegex(ValueError, 'symlink|worktree'):
                 adapter.run('frozen', str(state / 'worktrees' / 'run'))
 
@@ -312,9 +351,9 @@ class AdapterTests(unittest.TestCase):
                     {'id': 2, 'body': 'untrusted narrative', 'user': {'login': 'authorized-writer'}},
                     {'id': 3, 'body': json.dumps({'run_id': 'other', 'status': 'review-ready'}),
                      'user': {'login': 'authorized-writer'}}]
-        adapter = GitHubREST(request=request)
+        adapter = GitHubREST(POLICY, request=request)
         payload = json.dumps({'run_id': run_id, 'status': 'queued'})
-        self.assertEqual(adapter.statuses(adapter.REPO, 22, run_id, {'queued': payload}),
+        self.assertEqual(adapter.statuses(adapter.REPO, 101, run_id, {'queued': payload}),
                          [{'id': 1, 'status': 'queued'}])
         self.assertTrue(all(method == 'GET' for method, _ in seen))
 
@@ -326,20 +365,22 @@ class AdapterTests(unittest.TestCase):
                 return {'login': 'authorized-writer'}
             return [{'id': 10, 'body': expected, 'user': {'login': 'outsider'}},
                     {'id': 11, 'body': expected + ' ', 'user': {'login': 'authorized-writer'}}]
-        self.assertEqual(GitHubREST(request=request).statuses(
-            GitHubREST.REPO, 22, run_id, {'queued': expected}), [])
+        self.assertEqual(GitHubREST(POLICY, request=request).statuses(
+            GitHubREST.REPO, 101, run_id, {'queued': expected}), [])
 
     def test_local_agent_result_rejects_non_descendant_head(self):
         with tempfile.TemporaryDirectory() as directory:
             class Inert(HermesAgent):
                 def execute(self, argv, timeout=630):
                     return None
-            adapter = Inert('/source', directory, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = Inert('/source', directory, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
             def fake_git(args):
                 if 'get-url' in args:
                     return 'https://github.com/aliercankonus/signal-desk-prediction.git'
                 if 'cat-file' in args:
                     return 'commit'
+                if 'show-ref' in args:
+                    raise subprocess.CalledProcessError(1, args)
                 if 'merge-base' in args:
                     raise subprocess.CalledProcessError(1, args)
                 if 'rev-parse' in args:
@@ -355,12 +396,14 @@ class AdapterTests(unittest.TestCase):
             class Inert(HermesAgent):
                 def execute(self, argv, timeout=630):
                     calls.append(argv)
-            adapter = Inert('/source', directory, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = Inert('/source', directory, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
             def fake_git(args):
                 if 'get-url' in args:
                     return 'https://github.com/aliercankonus/signal-desk-prediction.git'
                 if 'cat-file' in args:
                     return 'commit'
+                if 'show-ref' in args:
+                    raise subprocess.CalledProcessError(1, args)
                 if 'rev-parse' in args:
                     return 'f' * 40 if args[-1] == 'HEAD' else 'a930a3c715635341e62538a3cc15a260162f6be9'
                 calls.append(args)
@@ -369,7 +412,7 @@ class AdapterTests(unittest.TestCase):
             worktree = str(Path(directory) / 'worktrees' / 'run')
             result = adapter.run('frozen prompt', worktree)
             self.assertEqual(result['head'], 'f'*40)
-            self.assertIn(['worktree', 'add', '-b', 'issue-22-bridge', worktree, 'a930a3c715635341e62538a3cc15a260162f6be9'], calls)
+            self.assertIn(['worktree', 'add', '-b', 'review-task-101', worktree, 'a930a3c715635341e62538a3cc15a260162f6be9'], calls)
             self.assertTrue(Path(directory, 'prompt').exists())
             Path(worktree).mkdir(parents=True)
             with self.assertRaises(FileExistsError):
@@ -390,7 +433,7 @@ class AdapterTests(unittest.TestCase):
                                      'reconcile', '--state', str(state)], capture_output=True, text=True,
                                     env={**os.environ, 'PYTHONPATH': 'src'})
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(json.loads(result.stdout)['operator_review'])
+            self.assertEqual(json.loads(result.stdout)['status'], 'queued')
             self.assertFalse(state.exists())
 
     def test_state_must_be_outside_repo_even_when_source_is_subdirectory(self):
@@ -414,7 +457,7 @@ class AdapterTests(unittest.TestCase):
                                      'once', '--state', str(link), '--source', str(source), '--execute-hermes'],
                                     capture_output=True, text=True, env={**os.environ, 'PYTHONPATH': 'src'})
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn('symlink', result.stderr)
+            self.assertIn('legacy bootstrap', result.stderr)
 
 
 if __name__ == '__main__':
