@@ -8,7 +8,16 @@ import unittest
 from signal_desk.task_bridge.adapters import HermesAgent, GitHubREST
 from signal_desk.task_bridge.bridge import Policy
 
+
 POLICY = Policy("aliercankonus/signal-desk-prediction", 101, "a" * 64, "a930a3c715635341e62538a3cc15a260162f6be9", "review-task-101")
+
+def inert_context(root, runner_commit):
+    path = Path(root) / 'context.json'
+    path.write_text(json.dumps({'test_python': str(Path(root) / 'venv' / 'bin' / 'python'),
+                                'requirements_sha256': 'a' * 64, 'runner_commit': runner_commit,
+                                'python_version': '3.14.9', 'pytest_version': '8.3.3'}))
+    path.chmod(0o600)
+    return path
 
 
 class AdapterTests(unittest.TestCase):
@@ -60,7 +69,9 @@ class AdapterTests(unittest.TestCase):
             start = git('rev-parse', 'HEAD')
             policy = Policy(POLICY.repo, 101, POLICY.body_digest, start, 'review-task-101')
             agent = HermesAgent(repo, Path(directory) / 'state', policy,
-                                help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+                                help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                                context_path=inert_context(directory, start),
+                                context_validator=lambda *args: args[0])
             self.assertTrue(agent.preflight())
             git('worktree', 'add', '-q', '-b', policy.branch, str(occupied), start)
             with self.assertRaisesRegex(ValueError, 'branch already exists'):
@@ -101,6 +112,80 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(adapter.command('/private/prompt', '/private/worktrees/run')[:2], ['hermes', 'chat'])
         with self.assertRaises(ValueError):
             HermesAgent('/source', '/private', POLICY, help_runner=lambda: '--oneshot').check()
+
+    def test_missing_private_context_blocks_before_worktree_or_child(self):
+        agent = HermesAgent('/source', '/state', POLICY,
+                            help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+        agent.git_runner = lambda args: ('https://github.com/' + POLICY.repo + '.git'
+                                         if 'get-url' in args else 'commit'
+                                         if 'cat-file' in args else
+                                         (_ for _ in ()).throw(subprocess.CalledProcessError(1, args))
+                                         if 'show-ref' in args else POLICY.base)
+        with self.assertRaisesRegex(ValueError, 'execution context'):
+            agent.preflight()
+
+    def test_once_cli_requires_private_context_before_any_effect_adapter(self):
+        from contextlib import redirect_stderr
+        from unittest.mock import patch
+        from signal_desk.task_bridge.__main__ import main
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'source'
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            auth = root / 'auth.json'
+            auth.write_text(json.dumps({'repo': POLICY.repo, 'issue': POLICY.issue,
+                                        'body_digest': POLICY.body_digest, 'base': POLICY.base,
+                                        'branch': POLICY.branch}))
+            auth.chmod(0o600)
+            errors = __import__('io').StringIO()
+            with patch('signal_desk.task_bridge.__main__.GitHubREST',
+                       side_effect=AssertionError('network adapter reached')), \
+                 patch('signal_desk.task_bridge.__main__.Bridge',
+                       side_effect=AssertionError('bridge reached')), \
+                 redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
+                main(['once', '--source', str(source), '--state', str(root / 'state'),
+                      '--auth', str(auth), '--execute-hermes'])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn('context', errors.getvalue())
+            self.assertFalse((root / 'state').exists())
+
+    def test_inert_real_git_handoff_is_private_and_prompt_quotes_explicit_interpreter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, state = root / 'source', root / 'state'
+            subprocess.run(['git', 'init', '-q', str(source)], check=True)
+            def git(*args):
+                return subprocess.run(['git', '-C', str(source), *args],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            git('-c', 'user.name=synthetic', '-c', 'user.email=synthetic@example.invalid',
+                'commit', '--allow-empty', '-qm', 'base')
+            git('remote', 'add', 'origin', 'https://github.com/' + POLICY.repo + '.git')
+            base = git('rev-parse', 'HEAD')
+            policy = Policy(POLICY.repo, 101, POLICY.body_digest, base, 'review-task-101')
+            selected = str(root / "private interpreter's bin" / 'python')
+            context = root / 'context.json'
+            context.write_text(json.dumps({'test_python': selected, 'requirements_sha256': 'a' * 64,
+                                           'runner_commit': base, 'python_version': '3.14.9',
+                                           'pytest_version': '8.3.3'}))
+            context.chmod(0o600)
+            state.mkdir(mode=0o700)
+            calls = []
+            class Inert(HermesAgent):
+                def execute(self, argv, timeout=630):
+                    calls.append(argv)
+            agent = Inert(source, state, policy, help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                          context_path=context, context_validator=lambda *a: a[0])
+            target = state / 'worktrees' / 'run'
+            result = agent.run('untrusted issue prose: python=bare; echo DANGER', target)
+            self.assertEqual(result['head'], base)
+            self.assertEqual(len(calls), 1)
+            handoff = state / 'execution-context.json'
+            self.assertEqual(handoff.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(handoff.read_text())['task_worktree'], str(target))
+            prompt = (state / 'prompt').read_text()
+            self.assertLess(prompt.index('Approved test interpreter'), prompt.index('untrusted issue prose'))
+            self.assertIn("'" + selected.replace("'", "'\"'\"'") + "'", prompt)
+            self.assertNotIn('SIGNAL_DESK_TEST_PYTHON', prompt)
     def test_timeout_kills_child_process_group(self):
         import sys
         with tempfile.TemporaryDirectory() as directory:
@@ -378,7 +463,9 @@ class AdapterTests(unittest.TestCase):
             state.mkdir()
             outside.mkdir()
             (state / 'worktrees').symlink_to(outside, target_is_directory=True)
-            adapter = HermesAgent('/source', state, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = HermesAgent('/source', state, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                                  context_path=inert_context(directory, POLICY.base),
+                                  context_validator=lambda *args: args[0])
             adapter.execute = lambda argv, timeout=630: None  # Never launch a real Hermes process in this test.
             def git(args):
                 if 'show-ref' in args:
@@ -420,10 +507,14 @@ class AdapterTests(unittest.TestCase):
 
     def test_local_agent_result_rejects_non_descendant_head(self):
         with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'private'
+            state.mkdir(mode=0o700)
             class Inert(HermesAgent):
                 def execute(self, argv, timeout=630):
                     return None
-            adapter = Inert('/source', directory, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = Inert('/source', state, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                            context_path=inert_context(directory, 'f' * 40),
+                            context_validator=lambda *args: args[0])
             def fake_git(args):
                 if 'get-url' in args:
                     return 'https://github.com/aliercankonus/signal-desk-prediction.git'
@@ -433,20 +524,26 @@ class AdapterTests(unittest.TestCase):
                     raise subprocess.CalledProcessError(1, args)
                 if 'merge-base' in args:
                     raise subprocess.CalledProcessError(1, args)
+                if args[:2] == ['worktree', 'add']:
+                    Path(args[4]).mkdir(parents=True)
                 if 'rev-parse' in args:
                     return 'f' * 40
                 return ''
             adapter.git_runner = fake_git
             with self.assertRaisesRegex(ValueError, 'ancestor|base'):
-                adapter.run('frozen', str(Path(directory) / 'worktrees' / 'run'))
+                adapter.run('frozen', str(state / 'worktrees' / 'run'))
 
     def test_agent_prepares_new_pinned_worktree_and_does_not_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'private'
+            state.mkdir(mode=0o700)
             calls = []
             class Inert(HermesAgent):
                 def execute(self, argv, timeout=630):
                     calls.append(argv)
-            adapter = Inert('/source', directory, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            adapter = Inert('/source', state, POLICY, help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                            context_path=inert_context(directory, 'f' * 40),
+                            context_validator=lambda *args: args[0])
             def fake_git(args):
                 if 'get-url' in args:
                     return 'https://github.com/aliercankonus/signal-desk-prediction.git'
@@ -456,15 +553,16 @@ class AdapterTests(unittest.TestCase):
                     raise subprocess.CalledProcessError(1, args)
                 if 'rev-parse' in args:
                     return 'f' * 40 if args[-1] == 'HEAD' else 'a930a3c715635341e62538a3cc15a260162f6be9'
+                if args[:2] == ['worktree', 'add']:
+                    Path(args[4]).mkdir(parents=True)
                 calls.append(args)
                 return ''
             adapter.git_runner = fake_git
-            worktree = str(Path(directory) / 'worktrees' / 'run')
+            worktree = str(state / 'worktrees' / 'run')
             result = adapter.run('frozen prompt', worktree)
             self.assertEqual(result['head'], 'f'*40)
             self.assertIn(['worktree', 'add', '-b', 'review-task-101', worktree, 'a930a3c715635341e62538a3cc15a260162f6be9'], calls)
-            self.assertTrue(Path(directory, 'prompt').exists())
-            Path(worktree).mkdir(parents=True)
+            self.assertTrue((state / 'prompt').exists())
             with self.assertRaises(FileExistsError):
                 adapter.run('frozen prompt', worktree)
     def test_doctor_cli_is_read_only(self):

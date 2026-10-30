@@ -8,17 +8,23 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 from .bridge import Policy, REPO
+from .context import (load_execution_context, validate_execution_context,
+                      write_task_context, trusted_context_prompt)
 
 
 class HermesAgent:
     FLAGS = ('--query-file', '--oneshot', '--quiet', '--in', '--max-turns', '--run-budget')
 
-    def __init__(self, source, state, policy: Policy, help_runner=None):
+    def __init__(self, source, state, policy: Policy, help_runner=None,
+                 context_path=None, context_validator=None):
         self.source = source
         self.state = state
         self.policy = policy
         self.help_runner = help_runner or self._installed_help
         self.git_runner = self._git
+        self.context_path = Path(context_path) if context_path is not None else None
+        self.context_validator = context_validator or validate_execution_context
+        self._approved_context = None
 
     def _git(self, args):
         return subprocess.run(['git', '-C', str(self.source), *args], capture_output=True,
@@ -42,6 +48,13 @@ class HermesAgent:
                 raise
         else:
             raise ValueError('reviewed branch already exists')
+        if self.context_path is None:
+            raise ValueError('private execution context required')
+        context = load_execution_context(self.context_path, self.source, self.state)
+        if self._approved_context is not None and context != self._approved_context:
+            raise ValueError('private execution context changed')
+        self.context_validator(context, self.source, self.git_runner(['rev-parse', 'HEAD']))
+        self._approved_context = context
         return True
 
     def run(self, prompt, worktree):
@@ -56,10 +69,11 @@ class HermesAgent:
             raise ValueError('worktree outside state directory')
         parent.mkdir(parents=True, exist_ok=True)
         self.git_runner(['worktree', 'add', '-b', self.policy.branch, str(path), self.policy.base])
+        write_task_context(self.state, path, self._approved_context)
         prompt_path = Path(self.state) / 'prompt'
         fd = os.open(prompt_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w') as output:
-            output.write(prompt)
+            output.write(trusted_context_prompt(self._approved_context, path) + '\n' + prompt)
             output.flush()
             os.fsync(output.fileno())
         self.execute(self.command(prompt_path, path))
