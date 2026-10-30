@@ -130,7 +130,10 @@ class AdapterTests(unittest.TestCase):
                 return [{'number': 42, 'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
                          'draft': True, 'head': {'sha': 'f'*40, 'ref': 'issue-22-bridge',
                                                   'repo': {'full_name': 'aliercankonus/signal-desk-prediction'}},
-                         'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9'}}]
+                         'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
+                                  'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}}]
+            if '/git/ref/heads/main' in path:
+                return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': 'a930a3c715635341e62538a3cc15a260162f6be9'}}
             if '/compare/' in path:
                 return {'status': 'ahead', 'merge_base_commit': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9'}}
             if '/check-runs?' in path:
@@ -150,6 +153,68 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(pr['ci_head'], 'f'*40)
         gh.publish('aliercankonus/signal-desk-prediction', 22, 'safe status')
         self.assertEqual(calls[-1], ('GET', '/repos/aliercankonus/signal-desk-prediction/issues/comments/99', None))
+
+    def test_draft_pr_accepts_moving_main_tip_without_changing_pinned_start(self):
+        start = 'a930a3c715635341e62538a3cc15a260162f6be9'
+        tip = 'd' * 40
+        head = 'f' * 40
+        paths = []
+        def request(method, path, payload=None):
+            paths.append(path)
+            if '/pulls?' in path:
+                return [{'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
+                         'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
+                                                  'repo': {'full_name': GitHubREST.REPO}},
+                         'base': {'sha': start, 'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}},
+                         'body': 'Refs #22'}]
+            if '/git/ref/heads/main' in path:
+                return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': tip}}
+            if '/compare/' in path:
+                return {'status': 'ahead', 'merge_base_commit': {'sha': start}}
+            if '/check-runs?' in path:
+                return {'check_runs': []}
+            if '/actions/runs?' in path:
+                return {'workflow_runs': []}
+            if '/status' in path:
+                return {'sha': head, 'statuses': []}
+            raise AssertionError(path)
+        pr = GitHubREST(request=request).draft_pr(GitHubREST.REPO, 'issue-22-bridge')
+        self.assertIsNotNone(pr)
+        self.assertEqual(pr['pinned_start'], start)
+        self.assertEqual(pr['target_tip'], tip)
+        self.assertEqual(pr['target_branch'], 'main')
+        self.assertEqual(pr['target_repo'], GitHubREST.REPO)
+        self.assertTrue(any('/git/ref/heads/main' in path for path in paths))
+
+    def test_draft_pr_rejects_wrong_target_branch_or_repository(self):
+        for target_ref, target_repo in (('develop', GitHubREST.REPO), ('main', 'other/repo')):
+            calls = []
+            def request(method, path, payload=None):
+                calls.append(path)
+                if '/pulls?' in path:
+                    return [{'draft': True, 'head': {'sha': 'f' * 40, 'ref': 'issue-22-bridge',
+                                                       'repo': {'full_name': GitHubREST.REPO}},
+                             'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
+                                      'ref': target_ref, 'repo': {'full_name': target_repo}}}]
+                raise AssertionError('invalid target should stop before compare: ' + path)
+            self.assertIsNone(GitHubREST(request=request).draft_pr(GitHubREST.REPO, 'issue-22-bridge'))
+            self.assertEqual(len(calls), 1)
+
+    def test_draft_pr_rejects_inconsistent_ancestry_evidence(self):
+        start = 'a930a3c715635341e62538a3cc15a260162f6be9'
+        head = 'f' * 40
+        def request(method, path, payload=None):
+            if '/pulls?' in path:
+                return [{'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
+                                                   'repo': {'full_name': GitHubREST.REPO}},
+                         'base': {'sha': start, 'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}}]
+            if '/git/ref/heads/main' in path:
+                return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': 'd' * 40}}
+            if '/compare/' in path:
+                return {'status': 'ahead', 'merge_base_commit': {'sha': '0' * 40}}
+            raise AssertionError('inconsistent comparison should stop: ' + path)
+        self.assertIsNone(GitHubREST(request=request).draft_pr(GitHubREST.REPO, 'issue-22-bridge'))
+
     def test_draft_pr_rejects_head_not_descended_from_pinned_base(self):
         head = 'e' * 40
         def request(method, path, payload=None):
@@ -157,7 +222,10 @@ class AdapterTests(unittest.TestCase):
                 return [{'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
                          'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
                                                   'repo': {'full_name': 'aliercankonus/signal-desk-prediction'}},
-                         'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9'}, 'body': 'Refs #22'}]
+                         'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
+                                  'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}, 'body': 'Refs #22'}]
+            if '/git/ref/heads/main' in path:
+                return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': 'd' * 40}}
             if '/compare/' in path:
                 return {'status': 'diverged', 'merge_base_commit': {'sha': '0' * 40}}
             if '/check-runs?' in path:
@@ -178,7 +246,10 @@ class AdapterTests(unittest.TestCase):
                 return [{'html_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
                          'draft': True, 'head': {'sha': head, 'ref': 'issue-22-bridge',
                                                   'repo': {'full_name': 'aliercankonus/signal-desk-prediction'}},
-                         'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9'}, 'body': 'Refs #22'}]
+                         'base': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9',
+                                  'ref': 'main', 'repo': {'full_name': GitHubREST.REPO}}, 'body': 'Refs #22'}]
+            if '/git/ref/heads/main' in path:
+                return {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': 'd' * 40}}
             if '/compare/' in path:
                 return {'status': 'ahead', 'merge_base_commit': {'sha': 'a930a3c715635341e62538a3cc15a260162f6be9'}}
             if '/check-runs?' in path:

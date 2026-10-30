@@ -25,8 +25,9 @@ class FakeGitHub:
         self.posts = []
         self.fail_post = set()
         self.pr = {'url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
-                   'draft': True, 'head': HEAD, 'base': BASE, 'body': 'Refs #22',
-                   'ci': 'success', 'ci_head': HEAD}
+                   'draft': True, 'head': HEAD, 'body': 'Refs #22',
+                   'pinned_start': BASE, 'target_tip': BASE, 'target_branch': 'main',
+                   'target_repo': self.repo, 'ci': 'success', 'ci_head': HEAD}
 
     def issue(self, repo, number):
         self.issue_calls += 1
@@ -94,6 +95,42 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([json.loads(m)['status'] for m in self.github.posts],
                          ['queued', 'running', 'review-ready'])
         self.assertIn(HEAD, self.github.posts[-1])
+
+    def test_once_journals_pinned_start_separately_from_advanced_target_tip(self):
+        self.github.pr['target_tip'] = 'd' * 40
+        result = self.bridge().once()
+        self.assertEqual(result['status'], 'review-ready')
+        self.assertEqual(result['base'], BASE)
+        self.assertEqual(result['target_tip'], 'd' * 40)
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT base,target_tip FROM runs').fetchone(),
+                             (BASE, 'd' * 40))
+        payload = json.loads(self.github.posts[-1])
+        self.assertEqual(payload['base'], BASE)
+        self.assertEqual(payload['target_tip'], 'd' * 40)
+
+    def test_main_advancing_after_review_ready_does_not_block_reconciliation_or_duplicate_once(self):
+        self.assertEqual(self.bridge().once()['status'], 'review-ready')
+        self.github.pr['target_tip'] = 'e' * 40
+        observation = self.bridge().reconcile()
+        self.assertEqual(observation['result_mismatch'], [])
+        self.assertEqual(observation['target_tip'], BASE)
+        self.assertEqual(observation['observed_pr']['target_tip'], 'e' * 40)
+        result = self.bridge().once()
+        self.assertEqual(result['status'], 'review-ready')
+        self.assertEqual(result['target_tip'], 'e' * 40)
+        self.assertEqual(doctor(self.state)['status'], 'review-ready')
+        self.assertEqual(self.agent.calls, 1)
+
+    def test_once_rejects_wrong_target_or_unrelated_pinned_start(self):
+        for field, value in (('target_branch', 'develop'), ('target_repo', 'other/repo'),
+                             ('pinned_start', '0' * 40)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                gh, agent = FakeGitHub(), FakeAgent()
+                gh.pr[field] = value
+                result = Bridge(Path(directory) / 'state', self.policy, gh, agent).once()
+                self.assertEqual(result['status'], 'blocked')
+                self.assertNotIn('review-ready', [json.loads(text)['status'] for text in gh.posts])
 
     def test_stored_run_from_other_issue_cannot_report_ready(self):
         self.assertEqual(self.bridge().once()['status'], 'review-ready')
@@ -264,7 +301,11 @@ class BridgeTests(unittest.TestCase):
         self.agent.action = inspect
         self.bridge().once()
         self.assertEqual(seen[0]['status'], 'blocked')
-        self.assertEqual(seen[0]['head'], HEAD)
+        self.assertIsNone(seen[0]['head'])
+        self.assertIsNone(seen[0]['target_tip'])
+        self.assertEqual(seen[0]['observed_pr']['head'], HEAD)
+        self.assertEqual(seen[0]['observed_pr']['target_tip'], BASE)
+        self.assertIn('draft result not journaled', seen[0]['result_mismatch'])
         self.assertEqual(seen[0]['operator_review'], True)
         self.assertTrue(seen[0]['publication_consistent'])
         self.assertEqual(len(self.github.posts), 3)

@@ -52,7 +52,7 @@ def main(argv=None):
                         HermesAgent(source, state)).once()
     except Exception:
         parser.exit(1, 'bridge blocked; inspect private state with doctor\n')
-    print(json.dumps({key: result.get(key) for key in ('status', 'run_id', 'base', 'head', 'pr_url', 'ci')}))
+    print(json.dumps({key: result.get(key) for key in ('status', 'run_id', 'base', 'target_tip', 'head', 'pr_url', 'ci')}))
     return 0 if result['status'] == 'review-ready' else 1
 
 

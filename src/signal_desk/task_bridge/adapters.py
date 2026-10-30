@@ -173,13 +173,24 @@ class GitHubREST:
             return None
         pr = candidates[0]
         if (pr['head']['ref'] != branch or not pr['draft'] or
-            pr['head']['repo']['full_name'] != self.REPO):
+            pr['head']['repo']['full_name'] != self.REPO or
+            pr['base']['ref'] != 'main' or pr['base']['repo']['full_name'] != self.REPO):
             return None
         head = pr['head']['sha']
         if len(head) != 40 or any(c not in '0123456789abcdef' for c in head):
             return None
-        if pr['base']['sha'] != BASE:
+        # PR base.sha may be a snapshot. Read the branch ref independently to
+        # report the current target tip without changing the task's start pin.
+        target = self.request('GET', path + '/git/ref/heads/main')
+        if (target.get('ref') != 'refs/heads/main' or
+            target.get('object', {}).get('type') != 'commit'):
             return None
+        target_tip = target['object'].get('sha')
+        if (not isinstance(target_tip, str) or len(target_tip) != 40 or
+            any(c not in '0123456789abcdef' for c in target_tip)):
+            return None
+        # Compare the immutable starting commit to the result head, not to the
+        # moving branch tip. Both status and merge-base must support ancestry.
         comparison = self.request('GET', path + '/compare/' + BASE + '...' + head)
         if (comparison.get('status') not in ('ahead', 'identical') or
             comparison.get('merge_base_commit', {}).get('sha') != BASE):
@@ -208,8 +219,9 @@ class GitHubREST:
         else:
             ci_state = 'pending'
         return {'url': pr['html_url'], 'draft': True, 'head': head,
-                'base': pr['base']['sha'], 'body': pr.get('body') or '',
-                'ci_head': head, 'ci': ci_state}
+                'pinned_start': BASE, 'target_branch': 'main',
+                'target_repo': self.REPO, 'target_tip': target_tip,
+                'body': pr.get('body') or '', 'ci_head': head, 'ci': ci_state}
 
     def statuses(self, repo, number, run_id, expected):
         if (number != 22 or not isinstance(run_id, str) or len(run_id) != 32 or

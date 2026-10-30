@@ -31,6 +31,22 @@ class Bridge:
         self.github = github
         self.agent = agent
 
+    def _verified_draft(self, pr):
+        """The immutable start and the moving main tip have different roles."""
+        p = self.policy
+        try:
+            return bool(
+                pr and pr['draft'] is True and pr['pinned_start'] == p.base and
+                pr['target_branch'] == 'main' and pr['target_repo'] == p.repo and
+                re.fullmatch('[0-9a-f]{40}', pr['target_tip']) and
+                re.fullmatch('[0-9a-f]{40}', pr['head']) and
+                pr['ci_head'] == pr['head'] and
+                pr['ci'] in ('success', 'failure', 'pending', 'unknown') and
+                re.search(r'(?<!\w)#22\b', pr.get('body') or '') and
+                re.fullmatch(r'https://github\.com/' + re.escape(p.repo) + r'/pull/[1-9][0-9]*', pr['url']))
+        except (KeyError, TypeError):
+            return False
+
     def reconcile(self):
         """Read-only external observation; never authorizes retry or promotion."""
         current = self.status()
@@ -44,7 +60,8 @@ class Bridge:
                     'reason': 'journal authorization mismatch'}
         result = {'status': 'blocked', 'run_id': current['run_id'],
                   'operator_review': True, 'head': current['head'],
-                  'pr_url': current['pr_url'], 'ci': current['ci']}
+                  'pr_url': current['pr_url'], 'ci': current['ci'],
+                  'base': current['base'], 'target_tip': current['target_tip']}
         with sqlite3.connect(f"file:{self.state / 'journal.sqlite3'}?mode=ro", uri=True) as conn:
             rows = conn.execute('SELECT status,comment_id FROM publications ORDER BY id LIMIT 5').fetchall()
         if len(rows) > 4:
@@ -58,7 +75,8 @@ class Bridge:
                 status, current['run_id'],
                 current['head'] if include_result else None,
                 current['pr_url'] if include_result else None,
-                current['ci'] if include_result else None)
+                current['ci'] if include_result else None,
+                current['target_tip'] if include_result else None)
         try:
             observed = self.github.statuses(self.policy.repo, self.policy.issue, current['run_id'], expected)
             if len(observed) > 4:
@@ -81,19 +99,17 @@ class Bridge:
         result['result_mismatch'] = []
         try:
             pr = self.github.draft_pr(self.policy.repo, current['branch'])
-            if (pr and pr['draft'] and pr['base'] == current['base'] and
-                re.fullmatch('[0-9a-f]{40}', pr['head']) and
+            if (pr and re.fullmatch('[0-9a-f]{40}', pr['head']) and
                 re.fullmatch(r'https://github\.com/' + re.escape(REPO) + r'/pull/[1-9][0-9]*', pr['url'])):
-                result['observed_pr'] = {'head': pr['head'], 'url': pr['url'], 'ci': pr['ci']}
-                if (pr.get('ci_head') != pr['head'] or
-                    not re.search(r'(?<!\w)#22\b', pr.get('body') or '')):
+                result['observed_pr'] = {'head': pr['head'], 'url': pr['url'],
+                                         'ci': pr['ci'], 'target_tip': pr['target_tip']}
+                if not self._verified_draft(pr):
                     result['result_mismatch'].append('draft PR verification failed')
                 if current['head'] or current['pr_url']:
                     if pr['head'] != current['head'] or pr['url'] != current['pr_url']:
                         result['result_mismatch'].append('stored draft result differs')
                 else:
                     result['result_mismatch'].append('draft result not journaled')
-                    result.update(head=pr['head'], pr_url=pr['url'], ci=pr['ci'])
             else:
                 result['result_mismatch'].append('draft PR missing or invalid')
         except Exception:
@@ -106,10 +122,10 @@ class Bridge:
             return None
         try:
             with sqlite3.connect(f'file:{db}?mode=ro', uri=True) as conn:
-                row = conn.execute('SELECT run_id,repo,issue_number,status,base,body_digest,branch,worktree,head,pr_url,ci FROM runs LIMIT 1').fetchone()
+                row = conn.execute('SELECT run_id,repo,issue_number,status,base,body_digest,branch,worktree,head,pr_url,ci,target_tip FROM runs LIMIT 1').fetchone()
         except sqlite3.DatabaseError:
             row = None
-        return (dict(zip(('run_id','repo','issue_number','status','base','body_digest','branch','worktree','head','pr_url','ci'), row))
+        return (dict(zip(('run_id','repo','issue_number','status','base','body_digest','branch','worktree','head','pr_url','ci','target_tip'), row))
                 if row else {'status': 'blocked', 'reason': 'journal incomplete or invalid'})
 
     def once(self):
@@ -143,11 +159,9 @@ class Bridge:
             if current['status'] == 'review-ready':
                 try:
                     pr = self.github.draft_pr(self.policy.repo, current['branch'])
-                    if (pr and pr['draft'] and pr['head'] == current['head'] and
-                        pr['base'] == current['base'] and pr.get('ci_head') == pr['head'] and
-                        re.search(r'(?<!\w)#22\b', pr.get('body') or '') and
+                    if (self._verified_draft(pr) and pr['head'] == current['head'] and
                         pr['url'] == current['pr_url']):
-                        return {**current, 'ci': pr['ci']}
+                        return {**current, 'ci': pr['ci'], 'target_tip': pr['target_tip']}
                 except Exception:
                     pass
                 self._update('blocked')
@@ -172,8 +186,8 @@ class Bridge:
         fd = os.open(db, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(fd)
         with sqlite3.connect(db) as conn:
-            conn.execute('CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, repo TEXT NOT NULL, issue_number INTEGER NOT NULL, status TEXT NOT NULL, base TEXT NOT NULL, body_digest TEXT NOT NULL, branch TEXT NOT NULL, worktree TEXT NOT NULL, head TEXT, pr_url TEXT, ci TEXT)')
-            conn.execute('CREATE TABLE events (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, recorded_at TEXT NOT NULL, head TEXT, pr_url TEXT, ci TEXT)')
+            conn.execute('CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, repo TEXT NOT NULL, issue_number INTEGER NOT NULL, status TEXT NOT NULL, base TEXT NOT NULL, body_digest TEXT NOT NULL, branch TEXT NOT NULL, worktree TEXT NOT NULL, head TEXT, pr_url TEXT, ci TEXT, target_tip TEXT)')
+            conn.execute('CREATE TABLE events (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL, recorded_at TEXT NOT NULL, head TEXT, pr_url TEXT, ci TEXT, target_tip TEXT)')
             conn.execute('CREATE TABLE publications (id INTEGER PRIMARY KEY, status TEXT NOT NULL, comment_id INTEGER, recorded_at TEXT NOT NULL)')
             conn.execute('INSERT INTO runs (run_id,repo,issue_number,status,base,body_digest,branch,worktree) VALUES (?,?,?,?,?,?,?,?)',
                          (run_id, p.repo, p.issue, 'queued', p.base, p.body_digest, branch, worktree))
@@ -197,32 +211,29 @@ class Bridge:
             pr = self.github.draft_pr(p.repo, branch)
             if (not pr or result.get('branch') != branch or
                 not re.fullmatch('[0-9a-f]{40}', result['head']) or
-                not pr['draft'] or pr['head'] != result['head'] or
-                pr['base'] != p.base or pr.get('ci_head') != pr['head'] or
-                not re.search(r'(?<!\w)#22\b', pr.get('body') or '') or
-                pr.get('ci') not in ('success', 'failure', 'pending', 'unknown') or
-                not re.fullmatch(r'https://github\.com/' + re.escape(p.repo) + r'/pull/[1-9][0-9]*', pr['url'])):
+                not self._verified_draft(pr) or pr['head'] != result['head']):
                 raise ValueError('draft PR verification failed')
-            self._update('running', result['head'], pr['url'], pr.get('ci', 'unknown'))
-            self._publish_status('review-ready', run_id, result['head'], pr['url'], pr.get('ci', 'unknown'))
-            self._update('review-ready', result['head'], pr['url'], pr.get('ci', 'unknown'))
+            self._update('running', result['head'], pr['url'], pr['ci'], pr['target_tip'])
+            self._publish_status('review-ready', run_id, result['head'], pr['url'], pr['ci'], pr['target_tip'])
+            self._update('review-ready', result['head'], pr['url'], pr['ci'], pr['target_tip'])
         except BaseException:
             self._update('blocked')
             current = self.status() or {}
             try:
-                self._publish_status('blocked', run_id, current.get('head'), current.get('pr_url'), current.get('ci'))
+                self._publish_status('blocked', run_id, current.get('head'), current.get('pr_url'),
+                                     current.get('ci'), current.get('target_tip'))
             except Exception:
                 pass  # The durable blocked row survives a publication failure.
         return self.status()
 
-    def _status_text(self, status, run_id, head=None, pr_url=None, ci=None):
+    def _status_text(self, status, run_id, head=None, pr_url=None, ci=None, target_tip=None):
         payload = {'status': status, 'run_id': run_id, 'base': self.policy.base}
         if head:
-            payload.update(head=head, pr_url=pr_url, ci=ci)
+            payload.update(head=head, pr_url=pr_url, ci=ci, target_tip=target_tip)
         return json.dumps(payload)
 
-    def _publish_status(self, status, run_id, head=None, pr_url=None, ci=None):
-        text = self._status_text(status, run_id, head, pr_url, ci)
+    def _publish_status(self, status, run_id, head=None, pr_url=None, ci=None, target_tip=None):
+        text = self._status_text(status, run_id, head, pr_url, ci, target_tip)
         db = self.state / 'journal.sqlite3'
         with sqlite3.connect(db) as conn:
             if conn.execute('SELECT count(*) FROM publications').fetchone()[0] >= 4:
@@ -236,7 +247,7 @@ class Bridge:
             conn.execute('UPDATE publications SET comment_id=? WHERE id=? AND comment_id IS NULL',
                          (receipt, row_id))
 
-    def _update(self, status, head=None, pr_url=None, ci=None):
+    def _update(self, status, head=None, pr_url=None, ci=None, target_tip=None):
         if status not in ('running', 'blocked', 'review-ready'):
             raise ValueError('invalid journal transition')
         with sqlite3.connect(self.state / 'journal.sqlite3') as conn:
@@ -245,11 +256,11 @@ class Bridge:
             row = conn.execute('SELECT run_id FROM runs LIMIT 1').fetchone()
             if row is None:
                 raise RuntimeError('run identity missing')
-            conn.execute('UPDATE runs SET status=?,head=coalesce(?,head),pr_url=coalesce(?,pr_url),ci=coalesce(?,ci)',
-                         (status, head, pr_url, ci))
-            conn.execute("INSERT INTO events (run_id,status,recorded_at,head,pr_url,ci) "
-                         "VALUES (?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?,?,?)",
-                         (row[0], status, head, pr_url, ci))
+            conn.execute('UPDATE runs SET status=?,head=coalesce(?,head),pr_url=coalesce(?,pr_url),ci=coalesce(?,ci),target_tip=coalesce(?,target_tip)',
+                         (status, head, pr_url, ci, target_tip))
+            conn.execute("INSERT INTO events (run_id,status,recorded_at,head,pr_url,ci,target_tip) "
+                         "VALUES (?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?,?,?,?)",
+                         (row[0], status, head, pr_url, ci, target_tip))
 
 
 def doctor(state):
@@ -259,12 +270,12 @@ def doctor(state):
         return {'status': 'queued'}
     try:
         with sqlite3.connect(f'file:{db}?mode=ro', uri=True) as conn:
-            row = conn.execute('SELECT status,run_id,base,body_digest,repo,issue_number,head,pr_url,ci FROM runs LIMIT 1').fetchone()
+            row = conn.execute('SELECT status,run_id,base,body_digest,repo,issue_number,head,pr_url,ci,target_tip FROM runs LIMIT 1').fetchone()
     except sqlite3.DatabaseError:
         row = None
     if not row:
         return {'status': 'blocked', 'reason': 'journal has no run identity'}
-    result: dict[str, object] = dict(zip(('status','run_id','base','body_digest','repo','issue_number','head','pr_url','ci'), row))
+    result: dict[str, object] = dict(zip(('status','run_id','base','body_digest','repo','issue_number','head','pr_url','ci','target_tip'), row))
     if (result['repo'] != REPO or result['issue_number'] != ISSUE or
         result['body_digest'] != DIGEST or result['base'] != BASE):
         result['status'] = 'blocked'
