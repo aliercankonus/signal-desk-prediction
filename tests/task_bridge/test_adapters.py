@@ -108,6 +108,8 @@ class AdapterTests(unittest.TestCase):
                         return 'commit'
                     if 'show-ref' in args:
                         raise subprocess.CalledProcessError(1, args)
+                    if args[-2:] in (['var', 'GIT_AUTHOR_IDENT'], ['var', 'GIT_COMMITTER_IDENT']):
+                        return 'Synthetic reviewer <reviewer@example.invalid> 0 +0000'
                     if args[:2] == ['worktree', 'add']:
                         Path(args[4]).mkdir(parents=True)
                         return ''
@@ -148,6 +150,8 @@ class AdapterTests(unittest.TestCase):
                     return 'commit'
                 if 'show-ref' in args:
                     raise subprocess.CalledProcessError(1, args)
+                if args[-2:] in (['var', 'GIT_AUTHOR_IDENT'], ['var', 'GIT_COMMITTER_IDENT']):
+                    return 'Synthetic reviewer <reviewer@example.invalid> 0 +0000'
                 if args[:2] == ['worktree', 'add']:
                     Path(args[4]).mkdir(parents=True)
                     return ''
@@ -181,6 +185,8 @@ class AdapterTests(unittest.TestCase):
                     return 'commit'
                 if 'show-ref' in args:
                     raise subprocess.CalledProcessError(1, args)
+                if args[-2:] in (['var', 'GIT_AUTHOR_IDENT'], ['var', 'GIT_COMMITTER_IDENT']):
+                    return 'Synthetic reviewer <reviewer@example.invalid> 0 +0000'
                 if args[:2] == ['worktree', 'add']:
                     Path(args[4]).mkdir(parents=True)
                     return ''
@@ -214,6 +220,8 @@ class AdapterTests(unittest.TestCase):
                     return 'commit'
                 if 'show-ref' in args:
                     raise subprocess.CalledProcessError(1, args)
+                if args[-2:] in (['var', 'GIT_AUTHOR_IDENT'], ['var', 'GIT_COMMITTER_IDENT']):
+                    return 'Synthetic reviewer <reviewer@example.invalid> 0 +0000'
                 if args[:2] == ['worktree', 'add']:
                     Path(args[4]).mkdir(parents=True)
                     return ''
@@ -370,6 +378,8 @@ class AdapterTests(unittest.TestCase):
             base = git('rev-parse', 'HEAD')
             policy = Policy(POLICY.repo, 101, POLICY.body_digest, base, 'review-task-101')
             selected = str(root / "private interpreter's bin" / 'python')
+            git('config', '--local', 'user.name', 'Synthetic reviewer')
+            git('config', '--local', 'user.email', 'reviewer@example.invalid')
             context = root / 'context.json'
             context.write_text(json.dumps({'test_python': selected, 'requirements_sha256': 'a' * 64,
                                            'runner_commit': base, 'python_version': '3.14.9',
@@ -387,6 +397,8 @@ class AdapterTests(unittest.TestCase):
                         '-qm', 'inert child commit')
             agent = Inert(source, state, policy, help_runner=lambda: ' '.join(HermesAgent.FLAGS),
                           context_path=context, context_validator=lambda *a: a[0])
+            stages = []
+            agent.stage_callback = lambda stage, invocation=None: stages.append(stage)
             real_git = agent.git_runner
             # The inert child cannot push; simulate only the remote-ref readback.
             agent.git_runner = lambda args: (git('-C', str(state / 'worktrees' / 'run'), 'rev-parse', 'HEAD') +
@@ -394,6 +406,8 @@ class AdapterTests(unittest.TestCase):
                                              if args[:2] == ['ls-remote', '--exit-code'] else real_git(args))
             target = state / 'worktrees' / 'run'
             result = agent.run('untrusted issue prose: python=bare; echo DANGER', target)
+            self.assertEqual(stages, ['preflight', 'child_invocation', 'child_completion',
+                                      'local_result_verification'])
             self.assertNotEqual(result['head'], base)
             self.assertEqual(result['head'], git('-C', str(target), 'rev-parse', 'HEAD'))
             self.assertEqual(len(calls), 1)
@@ -404,6 +418,105 @@ class AdapterTests(unittest.TestCase):
             self.assertLess(prompt.index('Approved test interpreter'), prompt.index('untrusted issue prose'))
             self.assertIn("'" + selected.replace("'", "'\"'\"'") + "'", prompt)
             self.assertNotIn('SIGNAL_DESK_TEST_PYTHON', prompt)
+    def test_real_task_worktree_git_identity_blocks_before_agent_and_accepts_worktree_config(self):
+        from unittest.mock import patch
+        for mode in ('missing_both', 'author_only', 'committer_only', 'worktree'):
+            configure = mode == 'worktree'
+            with self.subTest(identity_mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, state = root / 'source', root / 'state'
+                subprocess.run(['git', 'init', '-q', str(source)], check=True)
+                def git(*args):
+                    return subprocess.run(['git', '-C', str(source), *args],
+                                          capture_output=True, text=True, check=True).stdout.strip()
+                git('-c', 'user.name=synthetic', '-c', 'user.email=synthetic@example.invalid',
+                    'commit', '--allow-empty', '-qm', 'base')
+                git('remote', 'add', 'origin', 'https://github.com/' + POLICY.repo + '.git')
+                base = git('rev-parse', 'HEAD')
+                policy = Policy(POLICY.repo, POLICY.issue, POLICY.body_digest, base, POLICY.branch)
+                context = root / 'context.json'
+                context.write_text(json.dumps({'test_python': str(root / 'python'),
+                                               'requirements_sha256': 'a' * 64,
+                                               'runner_commit': base, 'python_version': '3.14.9',
+                                               'pytest_version': '8.3.3'}))
+                context.chmod(0o600)
+                state.mkdir(mode=0o700)
+                calls = []
+                agent = HermesAgent(source, state, policy, help_runner=lambda: ' '.join(HermesAgent.FLAGS),
+                                    context_path=context, context_validator=lambda *args: args[0])
+                real_git = agent.git_runner
+                seen_identity_fields = []
+                def watched_git(args):
+                    if args[-2:] in (['var', 'GIT_AUTHOR_IDENT'], ['var', 'GIT_COMMITTER_IDENT']):
+                        self.assertIn('user.useConfigOnly=true', args)
+                        seen_identity_fields.append(args[-1])
+                    if args[:2] == ['ls-remote', '--exit-code']:
+                        raise AssertionError('remote read reached without inert result')
+                    result = real_git(args)
+                    if configure and args[:2] == ['worktree', 'add']:
+                        git('config', '--local', 'extensions.worktreeConfig', 'true')
+                        target = state / 'worktrees' / 'run'
+                        for key, value in (('user.name', 'Synthetic reviewer'),
+                                           ('user.email', 'reviewer@example.invalid')):
+                            subprocess.run(['git', '-C', str(target), 'config', '--worktree', key, value],
+                                           check=True, capture_output=True)
+                    return result
+                agent.git_runner = watched_git
+                def inert_execute(argv, timeout=630):
+                    calls.append(argv)
+                    if configure:
+                        target = state / 'worktrees' / 'run'
+                        (target / 'synthetic.md').write_text('inert result\n')
+                        git('-C', str(target), 'add', 'synthetic.md')
+                        git('-C', str(target), 'commit', '-qm', 'synthetic result')
+                agent.execute = inert_execute
+                with patch.dict(os.environ, {'GIT_CONFIG_GLOBAL': os.devnull,
+                                             'GIT_CONFIG_SYSTEM': os.devnull}):
+                    for key in ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',
+                                'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'):
+                        os.environ.pop(key, None)
+                    if mode == 'author_only':
+                        os.environ.update(GIT_AUTHOR_NAME='Synthetic author',
+                                          GIT_AUTHOR_EMAIL='author@example.invalid')
+                    if mode == 'committer_only':
+                        os.environ.update(GIT_COMMITTER_NAME='Synthetic committer',
+                                          GIT_COMMITTER_EMAIL='committer@example.invalid')
+                    if configure:
+                        with self.assertRaisesRegex(AssertionError, 'inert result'):
+                            agent.run('inert task', state / 'worktrees' / 'run')
+                        self.assertEqual(len(calls), 1)
+                        self.assertEqual(seen_identity_fields,
+                                         ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT'])
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'Git.*identity'):
+                            agent.run('inert task', state / 'worktrees' / 'run')
+                        self.assertEqual(calls, [])
+
+    def test_child_termination_metadata_retains_numeric_exit_and_signal(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from signal_desk.task_bridge.adapters import AgentTerminationError
+        for code, status, reason in ((os.CLD_EXITED, 7, 'exit_nonzero'),
+                                     (os.CLD_KILLED, 15, 'signal'),
+                                     (999, 19, 'unknown')):
+            with self.subTest(reason=reason):
+                class FakeChild:
+                    pid = 314159
+                    def wait(self, timeout=None):
+                        return 0
+                agent = HermesAgent('/source', '/state', POLICY)
+                with patch('signal_desk.task_bridge.adapters.subprocess.Popen', return_value=FakeChild()), \
+                     patch('signal_desk.task_bridge.adapters.os.waitid',
+                           return_value=SimpleNamespace(si_code=code, si_status=status)), \
+                     patch('signal_desk.task_bridge.adapters.os.killpg'):
+                    with self.assertRaises(AgentTerminationError) as raised:
+                        agent.execute(['/bin/false'], timeout=1)
+                self.assertEqual(raised.exception.stop_reason, reason)
+                self.assertEqual(agent.last_invocation['stop_reason'], reason)
+                self.assertEqual(agent.last_invocation['exit_code'], status if reason == 'exit_nonzero' else None)
+                self.assertEqual(agent.last_invocation['signal_number'], status if reason == 'signal' else None)
+                self.assertGreaterEqual(agent.last_invocation['duration_ms'], 0)
+
     def test_timeout_kills_child_process_group(self):
         import sys
         with tempfile.TemporaryDirectory() as directory:
@@ -740,6 +853,8 @@ class AdapterTests(unittest.TestCase):
                     return 'commit'
                 if 'show-ref' in args:
                     raise subprocess.CalledProcessError(1, args)
+                if args[-2:] in (['var', 'GIT_AUTHOR_IDENT'], ['var', 'GIT_COMMITTER_IDENT']):
+                    return 'Synthetic reviewer <reviewer@example.invalid> 0 +0000'
                 if 'merge-base' in args:
                     raise subprocess.CalledProcessError(1, args)
                 if 'symbolic-ref' in args:
@@ -771,6 +886,8 @@ class AdapterTests(unittest.TestCase):
                     return 'commit'
                 if 'show-ref' in args:
                     raise subprocess.CalledProcessError(1, args)
+                if args[-2:] in (['var', 'GIT_AUTHOR_IDENT'], ['var', 'GIT_COMMITTER_IDENT']):
+                    return 'Synthetic reviewer <reviewer@example.invalid> 0 +0000'
                 if 'rev-parse' in args:
                     if args[-1].endswith('^{tree}'):
                         return ('f' if args[-1] == 'HEAD^{tree}' else 'a') * 40
