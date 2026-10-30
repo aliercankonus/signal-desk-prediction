@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tracemalloc
@@ -238,20 +239,26 @@ def test_stale_trade_or_book_is_unready(capture):
     assert replay_session(raw, session)["ready_features"] == 1
 
 
-def test_memory_does_not_scale_with_record_count(capture):
+def test_memory_does_not_scale_with_record_count(capture, tmp_path):
     raw, session, emit, trade, depth, online, config = capture
     depth()
     for number in range(1, 101): trade(number)
-    replay_session(raw, session)  # Warm schema/regex caches before measurement.
-    def peak():
+    small_raw = tmp_path / "small_raw"
+    shutil.copytree(raw, small_raw)
+    for number in range(101, 1001): trade(number)
+    # Warm schema/regex caches on the short input. A one-time process-wide
+    # pathlib intern-table resize can occur in either measured replay, so use
+    # the lowest of three per-call peaks at each input size.
+    replay_session(small_raw, session)
+    def peak(directory):
         tracemalloc.start()
-        replay_session(raw, session)
+        replay_session(directory, session)
         _, result = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         return result
-    small = peak()
-    for number in range(101, 1001): trade(number)
-    large = peak()
+    small = min(peak(small_raw) for _ in range(3))
+    large = min(peak(raw) for _ in range(3))
+    assert small < 1_000_000, small  # A polluted baseline must not mask growth.
     assert large < small + 1_000_000, (small, large)
 
 
