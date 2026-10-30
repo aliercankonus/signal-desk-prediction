@@ -36,7 +36,7 @@ class HermesAgent:
             raise ValueError('pinned base commit unavailable')
         # A pre-existing branch, including one in another worktree, is ambiguous.
         try:
-            self.git_runner(['show-ref', '--verify', 'refs/heads/' + self.policy.branch])
+            self.git_runner(['show-ref', '--verify', '--quiet', 'refs/heads/' + self.policy.branch])
         except subprocess.CalledProcessError as exc:
             if exc.returncode != 1:
                 raise

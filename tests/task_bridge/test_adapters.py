@@ -44,6 +44,56 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'branch already exists'):
             agent.preflight()
 
+    def test_real_git_preflight_accepts_absent_branch_and_rejects_occupied_branch_and_bad_commit(self):
+        # Use the production Git subprocess path; only Hermes help is synthetic.
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / 'source'
+            occupied = Path(directory) / 'occupied-worktree'
+            def git(*args):
+                return subprocess.run(['git', '-C', str(repo), *args],
+                                      capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True,
+                           capture_output=True, text=True)
+            git('-c', 'user.name=synthetic', '-c', 'user.email=synthetic@example.invalid',
+                'commit', '--allow-empty', '-qm', 'synthetic base')
+            git('remote', 'add', 'origin', 'https://github.com/' + POLICY.repo + '.git')
+            start = git('rev-parse', 'HEAD')
+            policy = Policy(POLICY.repo, 101, POLICY.body_digest, start, 'review-task-101')
+            agent = HermesAgent(repo, Path(directory) / 'state', policy,
+                                help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            self.assertTrue(agent.preflight())
+            git('worktree', 'add', '-q', '-b', policy.branch, str(occupied), start)
+            with self.assertRaisesRegex(ValueError, 'branch already exists'):
+                agent.preflight()
+            unavailable = Policy(POLICY.repo, 101, POLICY.body_digest, '0' * 40,
+                                 'new-reviewed-branch')
+            missing_agent = HermesAgent(repo, Path(directory) / 'state', unavailable,
+                                        help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            with self.assertRaisesRegex(ValueError, 'pinned base commit unavailable'):
+                missing_agent.preflight()
+            blob = subprocess.run(['git', '-C', str(repo), 'hash-object', '-w', '--stdin'],
+                                  input=b'not a commit', capture_output=True, check=True).stdout.decode().strip()
+            wrong_kind = Policy(POLICY.repo, 101, POLICY.body_digest, blob,
+                                'new-reviewed-branch')
+            blob_agent = HermesAgent(repo, Path(directory) / 'state', wrong_kind,
+                                     help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+            with self.assertRaisesRegex(ValueError, 'pinned base commit unavailable'):
+                blob_agent.preflight()
+
+    def test_preflight_does_not_treat_unexpected_git_error_as_absent_branch(self):
+        agent = HermesAgent('/source', '/state', POLICY,
+                            help_runner=lambda: ' '.join(HermesAgent.FLAGS))
+        def git(args):
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/' + POLICY.repo + '.git'
+            if args[:2] == ['cat-file', '-t']:
+                return 'commit'
+            raise subprocess.CalledProcessError(128, ['git', *args])
+        agent.git_runner = git
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            agent.preflight()
+        self.assertEqual(error.exception.returncode, 128)
+
     def test_help_verification_requires_all_bounded_flags(self):
         help_text = '--query-file PATH --oneshot --quiet --in DIR --max-turns N --run-budget SECONDS'
         adapter = HermesAgent('/source', '/private', POLICY, help_runner=lambda: help_text)
