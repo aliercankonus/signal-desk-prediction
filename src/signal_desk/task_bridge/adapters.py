@@ -8,9 +8,19 @@ import re
 import urllib.request
 import urllib.parse
 from pathlib import Path
+from typing import Callable
 from .bridge import Policy, REPO, draft_title, draft_body
 from .context import (load_execution_context, validate_execution_context,
                       write_task_context, trusted_context_prompt)
+
+
+class AgentTerminationError(RuntimeError):
+    """Controlled child-process termination metadata, without captured output."""
+    def __init__(self, stop_reason, exit_code=None, signal_number=None):
+        super().__init__('agent process terminated without success')
+        self.stop_reason = stop_reason
+        self.exit_code = exit_code
+        self.signal_number = signal_number
 
 
 class HermesAgent:
@@ -26,6 +36,8 @@ class HermesAgent:
         self.context_path = Path(context_path) if context_path is not None else None
         self.context_validator = context_validator or validate_execution_context
         self._approved_context = None
+        self.stage_callback: Callable[..., None] | None = None
+        self.last_invocation: dict[str, int | str | None] | None = None
 
     def _git(self, args):
         return subprocess.run(['git', '-C', str(self.source), *args], capture_output=True,
@@ -60,6 +72,9 @@ class HermesAgent:
 
     def run(self, prompt, worktree):
         self.preflight()
+        self.last_invocation = None
+        if self.stage_callback:
+            self.stage_callback('preflight')
         path = Path(worktree)
         if path.exists() or path.is_symlink():
             raise FileExistsError('worktree already exists')
@@ -70,6 +85,16 @@ class HermesAgent:
             raise ValueError('worktree outside state directory')
         parent.mkdir(parents=True, exist_ok=True)
         self.git_runner(['worktree', 'add', '-b', self.policy.branch, str(path), self.policy.base])
+        # Git var resolves the effective identity IN the new task worktree,
+        # including legitimate worktree-specific user.name/user.email settings.
+        for field in ('GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT'):
+            try:
+                identity = self.git_runner(['-C', str(path), '-c', 'user.useConfigOnly=true',
+                                            'var', field])
+            except subprocess.SubprocessError:
+                raise ValueError('task Git author/committer identity missing') from None
+            if not identity:
+                raise ValueError('task Git author/committer identity missing')
         write_task_context(self.state, path, self._approved_context)
         prompt_path = Path(self.state) / 'prompt'
         fd = os.open(prompt_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -77,7 +102,12 @@ class HermesAgent:
             output.write(trusted_context_prompt(self._approved_context, path) + '\n' + prompt)
             output.flush()
             os.fsync(output.fileno())
+        if self.stage_callback:
+            self.stage_callback('child_invocation')
         self.execute(self.command(prompt_path, path))
+        if self.stage_callback:
+            self.stage_callback('child_completion', self.last_invocation)
+            self.stage_callback('local_result_verification')
         if self.git_runner(['remote', 'get-url', 'origin']) != 'https://github.com/' + self.policy.repo + '.git':
             raise ValueError('source repository changed after child completion')
         head = self.git_runner(['-C', str(path), 'rev-parse', 'HEAD'])
@@ -123,6 +153,9 @@ class HermesAgent:
             raise InterruptedError('agent interrupted')
         previous_handler = signal.signal(signal.SIGTERM, interrupted)
         child = None
+        started = time.monotonic()
+        stop_reason = 'unknown'
+        exit_code = signal_number = None
         try:
             child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                      stderr=subprocess.DEVNULL, start_new_session=True)
@@ -132,13 +165,32 @@ class HermesAgent:
             while True:
                 result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
                 if result is not None:
-                    if result.si_code != os.CLD_EXITED or result.si_status != 0:
-                        raise RuntimeError('agent failed; inspect worktree manually')
+                    if result.si_code == os.CLD_EXITED:
+                        exit_code = result.si_status
+                        stop_reason = 'exit_zero' if exit_code == 0 else 'exit_nonzero'
+                    elif result.si_code in (os.CLD_KILLED, os.CLD_DUMPED):
+                        signal_number = result.si_status
+                        stop_reason = 'signal'
+                    if stop_reason != 'exit_zero':
+                        raise AgentTerminationError(stop_reason, exit_code, signal_number)
                     break
                 if time.monotonic() >= deadline:
                     raise TimeoutError('agent wall time exceeded')
                 time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        except TimeoutError:
+            stop_reason = 'timeout'
+            raise
+        except InterruptedError:
+            stop_reason = 'interrupted'
+            raise
+        except BaseException:
+            if child is None:
+                stop_reason = 'spawn_failed'
+            raise
         finally:
+            self.last_invocation = {'stop_reason': stop_reason, 'exit_code': exit_code,
+                                    'signal_number': signal_number,
+                                    'duration_ms': int((time.monotonic() - started) * 1000)}
             # A second stop request must not interrupt bounded cleanup.
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             try:

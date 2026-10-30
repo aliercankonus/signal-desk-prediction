@@ -120,12 +120,163 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result['ci'], 'pending')
         self.assertEqual(self.github.create_calls, [(self.policy.repo, self.policy.branch, HEAD)])
         self.assertIn('Do not require gh or create the task PR', seen[0])
+        self.assertIn('GIT_AUTHOR_IDENT', seen[0])
+        self.assertIn('GIT_COMMITTER_IDENT', seen[0])
+        self.assertLess(seen[0].index('GIT_AUTHOR_IDENT'), seen[0].index(BODY))
         self.assertLess(seen[0].index('Do not require gh'), seen[0].index(BODY))
         with sqlite3.connect(self.state / 'journal.sqlite3') as db:
             self.assertEqual(db.execute('SELECT stage,expected_head,number,url FROM pr_creations').fetchone(),
                              ('verified', HEAD, 42, self.github.pr['url']))
         self.assertEqual(self.bridge().once()['status'], 'review-ready')
         self.assertEqual(len(self.github.create_calls), 1)
+
+    def test_success_journals_bounded_stages_before_effects(self):
+        self.github.pr = None
+        self.agent.last_invocation = {'stop_reason': 'exit_zero', 'exit_code': 0,
+                                      'signal_number': None, 'duration_ms': 987}
+        observed = []
+        original_run = self.agent.run
+        def run(prompt, worktree):
+            observed.append(doctor(self.state, self.policy)['diagnostics']['active_stage'])
+            return original_run(prompt, worktree)
+        self.agent.run = run
+        self.assertEqual(self.bridge().once()['status'], 'review-ready')
+        detail = doctor(self.state, self.policy)['diagnostics']
+        self.assertEqual(observed, ['child_invocation'])
+        self.assertIsNone(detail['failure'])
+        self.assertEqual(detail['active_stage'], 'status_publication')
+        self.assertEqual(detail['child_completion'], {'exit_code': 0, 'signal_number': None,
+                                                      'duration_ms': 987, 'stop_reason': 'exit_zero'})
+        for stage in ('preflight', 'child_invocation', 'child_completion',
+                      'local_result_verification', 'authority_verification',
+                      'remote_draft_discovery', 'pr_create_intent',
+                      'pr_create_response', 'pr_create_readback', 'status_publication'):
+            self.assertIn(stage, detail['stages'])
+        self.assertLess(detail['stages'].index('child_invocation'),
+                        detail['stages'].index('child_completion'))
+        self.assertEqual(self.bridge().reconcile()['diagnostics'], detail)
+
+    def test_unknown_child_termination_preserves_original_stage_without_raw_error(self):
+        self.agent.action = lambda: (_ for _ in ()).throw(RuntimeError('private child failure /secret'))
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        detail = doctor(self.state, self.policy)['diagnostics']
+        self.assertEqual(detail['failure']['stage'], 'child_invocation')
+        self.assertEqual(detail['failure']['category'], 'child_unknown')
+        self.assertEqual(detail['failure']['stop_reason'], 'unknown')
+        self.assertEqual(detail['active_stage'], 'status_publication')
+        self.assertNotIn('/secret', json.dumps(detail))
+        self.assertEqual(self.bridge().reconcile()['diagnostics'], detail)
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(self.agent.calls, 1)
+        self.assertEqual(self.github.create_calls, [])
+
+    def test_nonzero_child_exit_records_numeric_fact_without_inventing_turn_reason(self):
+        from signal_desk.task_bridge.adapters import AgentTerminationError
+        self.agent.action = lambda: (_ for _ in ()).throw(AgentTerminationError('exit_nonzero', 7))
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        failure = doctor(self.state, self.policy)['diagnostics']['failure']
+        self.assertEqual((failure['stage'], failure['category'], failure['exit_code'],
+                          failure['signal_number'], failure['stop_reason']),
+                         ('child_invocation', 'child_nonzero', 7, None, 'exit_nonzero'))
+        self.assertEqual(self.github.create_calls, [])
+
+    def test_nonzero_child_exit_with_adapter_duration_is_retained(self):
+        from signal_desk.task_bridge.adapters import AgentTerminationError
+        self.agent.last_invocation = {'stop_reason': 'exit_nonzero', 'exit_code': 7,
+                                      'signal_number': None, 'duration_ms': 1234}
+        self.agent.action = lambda: (_ for _ in ()).throw(AgentTerminationError('exit_nonzero', 7))
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        failure = doctor(self.state, self.policy)['diagnostics']['failure']
+        self.assertEqual(failure['duration_ms'], 1234)
+
+    def test_malformed_diagnostics_fail_closed_without_read_only_mutation(self):
+        self.assertEqual(self.bridge().once()['status'], 'review-ready')
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            db.execute("UPDATE stage_events SET stage='private /secret' WHERE id=1")
+        before = (self.state / 'journal.sqlite3').read_bytes()
+        inspection = doctor(self.state, self.policy)
+        self.assertEqual(inspection['status'], 'blocked')
+        self.assertTrue(inspection['diagnostics_unavailable'])
+        self.assertNotIn('/secret', json.dumps(inspection))
+        self.assertTrue(self.bridge().reconcile()['diagnostics_unavailable'])
+        self.assertEqual((self.state / 'journal.sqlite3').read_bytes(), before)
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(self.agent.calls, 1)
+
+    def test_queued_status_publication_failure_is_diagnostic_not_a_child_failure(self):
+        self.github.fail_post.add('queued')
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        failure = doctor(self.state, self.policy)['diagnostics']['failure']
+        self.assertEqual((failure['stage'], failure['category']),
+                         ('status_publication', 'publication_failed'))
+        self.assertEqual(self.agent.calls, 0)
+
+    def test_child_timeout_is_distinct_from_later_publication_failure(self):
+        self.agent.action = lambda: (_ for _ in ()).throw(TimeoutError('private timeout details'))
+        self.github.fail_post.add('blocked')
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        failure = doctor(self.state, self.policy)['diagnostics']['failure']
+        self.assertEqual((failure['stage'], failure['category']), ('child_invocation', 'child_timeout'))
+        self.assertNotIn('private timeout', json.dumps(failure))
+        self.assertEqual(self.github.create_calls, [])
+
+    def test_post_child_bad_result_is_not_misattributed_to_child_process(self):
+        self.agent.run = lambda prompt, worktree: {'head': 'bad /private', 'branch': self.policy.branch}
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        failure = doctor(self.state, self.policy)['diagnostics']['failure']
+        self.assertEqual((failure['stage'], failure['category']),
+                         ('local_result_verification', 'result_invalid'))
+        self.assertEqual(self.github.create_calls, [])
+
+    def test_changed_authority_after_child_is_recorded_before_pr_effect(self):
+        self.github.pr = None
+        self.agent.action = lambda: setattr(self.github, 'body', 'edited after child')
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        failure = doctor(self.state, self.policy)['diagnostics']['failure']
+        self.assertEqual((failure['stage'], failure['category']),
+                         ('authority_verification', 'authority_changed'))
+        self.assertEqual(self.github.create_calls, [])
+
+    def test_authority_read_error_is_not_misreported_as_authority_change(self):
+        self.github.pr = None
+        self.agent.action = lambda: setattr(self.github, 'issue',
+                                            lambda repo, number: (_ for _ in ()).throw(ValueError('malformed response')))
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        failure = doctor(self.state, self.policy)['diagnostics']['failure']
+        self.assertEqual((failure['stage'], failure['category']),
+                         ('authority_verification', 'authority_unavailable'))
+        self.assertEqual(self.github.create_calls, [])
+
+    def test_diagnostic_write_failure_preserves_original_exception(self):
+        self.agent.action = lambda: (_ for _ in ()).throw(RuntimeError('initiating failure'))
+        bridge = self.bridge()
+        with patch.object(bridge, '_record_failure', side_effect=OSError('diagnostic unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'initiating failure'):
+                bridge.once()
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
+        self.assertEqual(self.github.create_calls, [])
+
+    def test_legacy_journal_reports_absent_diagnostics_read_only(self):
+        self.assertEqual(self.bridge().once()['status'], 'review-ready')
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            db.execute('DROP TABLE stage_events')
+            db.execute('DROP TABLE failures')
+            db.execute('ALTER TABLE runs DROP COLUMN diagnostics_version')
+        before = (self.state / 'journal.sqlite3').read_bytes()
+        self.assertEqual(doctor(self.state, self.policy)['diagnostics'], {'missing': True})
+        self.assertEqual(self.bridge().reconcile()['diagnostics'], {'missing': True})
+        self.assertEqual((self.state / 'journal.sqlite3').read_bytes(), before)
+
+    def test_new_journal_missing_diagnostics_is_not_mistaken_for_legacy(self):
+        self.assertEqual(self.bridge().once()['status'], 'review-ready')
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            db.execute('DROP TABLE stage_events')
+            db.execute('DROP TABLE failures')
+        inspection = doctor(self.state, self.policy)
+        self.assertEqual(inspection['status'], 'blocked')
+        self.assertTrue(inspection['diagnostics_unavailable'])
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(self.agent.calls, 1)
 
     def test_matching_existing_draft_is_reused_without_any_post(self):
         result = self.bridge().once()
@@ -570,7 +721,8 @@ class BridgeTests(unittest.TestCase):
     def test_source_preflight_failure_never_publishes_or_invokes(self):
         self.agent.preflight_error = True
         self.assertEqual(self.bridge().once()['status'], 'blocked')
-        self.assertIsNone(self.bridge().status())
+        self.assertEqual(self.bridge().status()['status'], 'blocked')
+        self.assertEqual(doctor(self.state, self.policy)['diagnostics']['failure']['stage'], 'preflight')
         self.assertEqual(self.github.posts, [])
         self.assertEqual(self.agent.calls, 0)
 
