@@ -1,23 +1,30 @@
 import hashlib
+import io
 import json
+import os
 import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 from pathlib import Path
 
-from signal_desk.task_bridge.bridge import Bridge, Policy, doctor
+from signal_desk.task_bridge.bridge import Bridge, Policy, doctor, load_authorization
+from dataclasses import asdict
 
 BODY = (Path(__file__).parent / 'issue22.txt').read_text()
 DIGEST = hashlib.sha256(BODY.encode()).hexdigest()
 BASE = 'a930a3c715635341e62538a3cc15a260162f6be9'
 HEAD = 'f' * 40
+SYNTH_POLICY = Policy('aliercankonus/signal-desk-prediction', 101, DIGEST, BASE, 'review-task-101')
 
 
 class FakeGitHub:
     def __init__(self):
+        self.policy = SYNTH_POLICY
         self.repo = 'aliercankonus/signal-desk-prediction'
-        self.number = 22
+        self.number = 101
         self.body = BODY
         self.state = 'open'
         self.issue_calls = 0
@@ -25,7 +32,7 @@ class FakeGitHub:
         self.posts = []
         self.fail_post = set()
         self.pr = {'url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
-                   'draft': True, 'head': HEAD, 'body': 'Refs #22',
+                   'draft': True, 'head': HEAD, 'body': 'Refs #101',
                    'pinned_start': BASE, 'target_tip': BASE, 'target_branch': 'main',
                    'target_repo': self.repo, 'ci': 'success', 'ci_head': HEAD}
 
@@ -53,6 +60,7 @@ class FakeGitHub:
 
 class FakeAgent:
     def __init__(self):
+        self.policy = SYNTH_POLICY
         self.calls = 0
         self.action = None
         self.preflight_error = False
@@ -65,7 +73,7 @@ class FakeAgent:
         self.calls += 1
         if self.action:
             self.action()
-        return {'head': HEAD, 'branch': 'issue-22-bridge'}
+        return {'head': HEAD, 'branch': 'review-task-101'}
 
 
 class BridgeTests(unittest.TestCase):
@@ -75,10 +83,64 @@ class BridgeTests(unittest.TestCase):
         self.state = Path(self.tmp.name) / 'private'
         self.github = FakeGitHub()
         self.agent = FakeAgent()
-        self.policy = Policy('aliercankonus/signal-desk-prediction', 22, DIGEST, BASE)
+        self.policy = Policy('aliercankonus/signal-desk-prediction', 101, DIGEST, BASE, 'review-task-101')
+        self.auth_path = Path(self.tmp.name) / 'auth.json'
+        self.auth_path.write_text(json.dumps(asdict(self.policy)))
+        self.auth_path.chmod(0o600)
 
     def bridge(self, policy=None):
-        return Bridge(self.state, policy or self.policy, self.github, self.agent)
+        return Bridge(self.state, policy or self.policy, self.github, self.agent, auth_path=self.auth_path)
+
+    def test_direct_bridge_without_private_record_never_dispatches(self):
+        result = Bridge(self.state, self.policy, self.github, self.agent).once()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(self.agent.calls, 0)
+        self.assertEqual(self.github.posts, [])
+        self.assertIsNone(self.bridge().status())
+
+    def test_direct_bridge_rejects_authorization_inside_private_state(self):
+        self.state.mkdir(mode=0o700)
+        inside = self.state / 'auth.json'
+        inside.write_text(json.dumps(asdict(self.policy)))
+        inside.chmod(0o600)
+        result = Bridge(self.state, self.policy, self.github, self.agent, auth_path=inside).once()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(self.agent.calls, 0)
+        self.assertEqual(self.github.posts, [])
+        self.assertIsNone(self.bridge().status())
+
+    def test_direct_bridge_rejects_effectful_adapter_policy_mismatch(self):
+        different = Policy(self.policy.repo, 102, DIGEST, BASE, 'review-task-102')
+        for adapter in (self.agent, self.github):
+            with self.subTest(adapter=type(adapter).__name__):
+                adapter.policy = different
+                result = self.bridge().once()
+                self.assertEqual(result['status'], 'blocked')
+                self.assertEqual(self.agent.calls, 0)
+                self.assertEqual(self.github.posts, [])
+                self.assertIsNone(self.bridge().status())
+                adapter.policy = self.policy
+
+    def test_direct_bridge_rejects_adapter_without_policy(self):
+        del self.agent.policy
+        result = self.bridge().once()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(self.agent.calls, 0)
+        self.assertEqual(self.github.posts, [])
+        self.assertIsNone(self.bridge().status())
+
+    def test_cli_reconcile_uses_private_authorization_for_remote_readback(self):
+        from signal_desk.task_bridge.__main__ import main
+        self.assertEqual(self.bridge().once()['status'], 'review-ready')
+        output = io.StringIO()
+        with patch('signal_desk.task_bridge.__main__.GitHubREST', return_value=self.github), \
+             redirect_stdout(output):
+            self.assertEqual(main(['reconcile', '--state', str(self.state),
+                                   '--auth', str(self.auth_path)]), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result['publication_consistent'])
+        self.assertEqual(result['observed_pr']['head'], HEAD)
+        self.assertNotIn('reason', result)
 
     def test_once_records_before_invocation_and_duplicate_poll_does_not_redispatch(self):
         def inspect():
@@ -86,7 +148,7 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(row['status'], 'running')
             self.assertEqual(row['base'], BASE)
             self.assertEqual(row['body_digest'], DIGEST)
-            self.assertEqual(row['branch'], 'issue-22-bridge')
+            self.assertEqual(row['branch'], 'review-task-101')
             self.assertTrue(row['worktree'])
         self.agent.action = inspect
         self.assertEqual(self.bridge().once()['status'], 'review-ready')
@@ -119,7 +181,7 @@ class BridgeTests(unittest.TestCase):
         result = self.bridge().once()
         self.assertEqual(result['status'], 'review-ready')
         self.assertEqual(result['target_tip'], 'e' * 40)
-        self.assertEqual(doctor(self.state)['status'], 'review-ready')
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'review-ready')
         self.assertEqual(self.agent.calls, 1)
 
     def test_once_rejects_wrong_target_or_unrelated_pinned_start(self):
@@ -128,7 +190,8 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
                 gh, agent = FakeGitHub(), FakeAgent()
                 gh.pr[field] = value
-                result = Bridge(Path(directory) / 'state', self.policy, gh, agent).once()
+                result = Bridge(Path(directory) / 'state', self.policy, gh, agent,
+                                auth_path=self.auth_path).once()
                 self.assertEqual(result['status'], 'blocked')
                 self.assertNotIn('review-ready', [json.loads(text)['status'] for text in gh.posts])
 
@@ -136,7 +199,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(self.bridge().once()['status'], 'review-ready')
         with sqlite3.connect(self.state / 'journal.sqlite3') as db:
             db.execute('UPDATE runs SET issue_number=23')
-        self.assertEqual(doctor(self.state)['status'], 'blocked')
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
         result = self.bridge().once()
         self.assertEqual(result['status'], 'blocked')
         self.assertEqual(self.agent.calls, 1)
@@ -148,12 +211,27 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result['status'], 'blocked')
         self.assertEqual(self.agent.calls, 1)
 
+    def test_duplicate_poll_blocks_durably_if_issue_is_edited_or_closed(self):
+        for change in ('body', 'state'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                gh, agent = FakeGitHub(), FakeAgent()
+                bridge = Bridge(Path(directory) / 'state', self.policy, gh, agent,
+                                auth_path=self.auth_path)
+                self.assertEqual(bridge.once()['status'], 'review-ready')
+                before = list(gh.posts)
+                setattr(gh, change, 'edited' if change == 'body' else 'closed')
+                self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(bridge.status()['status'], 'blocked')
+                self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(gh.posts, before)
+                self.assertEqual(agent.calls, 1)
+
     def test_duplicate_poll_blocks_if_draft_pr_issue_link_is_removed(self):
         self.assertEqual(self.bridge().once()['status'], 'review-ready')
         self.github.pr['body'] = 'No issue link remains'
         result = self.bridge().once()
         self.assertEqual(result['status'], 'blocked')
-        self.assertEqual(doctor(self.state)['status'], 'blocked')
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
         self.assertEqual(self.bridge().status()['status'], 'blocked')
         self.assertEqual(self.agent.calls, 1)
 
@@ -161,7 +239,7 @@ class BridgeTests(unittest.TestCase):
         self.state.mkdir(mode=0o700)
         sqlite3.connect(self.state / 'journal.sqlite3').close()
         self.assertEqual(self.bridge().once()['status'], 'blocked')
-        self.assertEqual(doctor(self.state)['status'], 'blocked')
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
         self.assertEqual(self.bridge().reconcile()['status'], 'blocked')
         self.assertEqual(self.agent.calls, 0)
         self.assertEqual(self.github.posts, [])
@@ -201,7 +279,7 @@ class BridgeTests(unittest.TestCase):
     def test_restart_running_row_is_ambiguous_and_never_redispatches(self):
         observed = []
         def crash_window():
-            observed.append((doctor(self.state)['status'], self.bridge().status()['status']))
+            observed.append((doctor(self.state, self.policy)['status'], self.bridge().status()['status']))
         self.agent.action = crash_window
         self.bridge().once()
         self.assertEqual(observed, [('blocked', 'running')])
@@ -256,7 +334,7 @@ class BridgeTests(unittest.TestCase):
                          ['queued', 'running', 'blocked'])
 
     def test_untrusted_result_cannot_publish_secret_or_private_path(self):
-        self.agent.run = lambda prompt, worktree: {'head': 'secret=/private/token', 'branch': 'issue-22-bridge'}
+        self.agent.run = lambda prompt, worktree: {'head': 'secret=/private/token', 'branch': 'review-task-101'}
         self.github.pr['head'] = 'secret=/private/token'
         self.github.pr['ci_head'] = 'secret=/private/token'
         self.assertEqual(self.bridge().once()['status'], 'blocked')
@@ -315,7 +393,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual((self.state / 'journal.sqlite3').stat().st_mode & 0o777, 0o600)
         with sqlite3.connect(self.state / 'journal.sqlite3') as db:
             self.assertEqual(db.execute('SELECT count(*) FROM runs').fetchone()[0], 1)
-            self.assertEqual(db.execute('SELECT issue_number FROM runs').fetchone()[0], 22)
+            self.assertEqual(db.execute('SELECT issue_number FROM runs').fetchone()[0], 101)
             statuses = [row[0] for row in db.execute('SELECT status FROM events ORDER BY id')]
             self.assertEqual(statuses, ['queued', 'running', 'running', 'review-ready'])
             self.assertTrue(all(row[0] for row in db.execute('SELECT recorded_at FROM events')))
@@ -345,12 +423,158 @@ class BridgeTests(unittest.TestCase):
         self.assertIsNone(self.bridge().status())
 
     def test_policy_cannot_select_other_repo_issue_or_digest(self):
-        for policy in (Policy('other/repo', 22, DIGEST, BASE),
-                       Policy(self.policy.repo, 23, DIGEST, BASE),
-                       Policy(self.policy.repo, 22, hashlib.sha256(b'edited').hexdigest(), BASE),
-                       Policy(self.policy.repo, 22, DIGEST, '0' * 40)):
+        with self.assertRaises(ValueError):
+            Policy('other/repo', 101, DIGEST, BASE, 'review-task-101')
+        for policy in (Policy(self.policy.repo, 102, DIGEST, BASE, 'review-task-101'),
+                       Policy(self.policy.repo, 101, hashlib.sha256(b'edited').hexdigest(), BASE, 'review-task-101'),
+                       Policy(self.policy.repo, 101, DIGEST, '0' * 40, 'review-task-101')):
             self.assertEqual(self.bridge(policy).once()['status'], 'blocked')
         self.assertEqual(self.agent.calls, 0)
+
+    def test_strict_local_authorization_two_synthetic_tasks(self):
+        for number in (101, 102):
+            with self.subTest(number=number), tempfile.TemporaryDirectory() as directory:
+                body = f'Synthetic task {number}'
+                record = {'repo': self.github.repo, 'issue': number,
+                          'body_digest': hashlib.sha256(body.encode()).hexdigest(),
+                          'base': 'b' * 40, 'branch': f'review-task-{number}'}
+                path = Path(directory) / 'auth.json'
+                path.write_text(json.dumps(record))
+                path.chmod(0o600)
+                policy = load_authorization(path)
+                gh, agent = FakeGitHub(), FakeAgent()
+                gh.policy = agent.policy = policy
+                gh.number, gh.body = number, body
+                gh.pr.update(body=f'Refs #{number}', pinned_start=record['base'])
+                agent.run = lambda prompt, worktree: {'head': HEAD, 'branch': policy.branch}
+                bridge = Bridge(Path(directory) / 'state', policy, gh, agent, auth_path=path)
+                self.assertEqual(bridge.once()['status'], 'review-ready')
+                self.assertEqual(bridge.once()['status'], 'review-ready')
+                self.assertEqual(doctor(bridge.state, policy)['status'], 'review-ready')
+                self.assertEqual(Bridge(bridge.state, self.policy, gh, agent, auth_path=path).once()['status'], 'blocked')
+                self.assertEqual(doctor(bridge.state, self.policy)['status'], 'blocked')
+
+    def test_authorization_rejects_extra_fields_and_insecure_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'auth.json'
+            record = {'repo': self.github.repo, 'issue': 101, 'body_digest': 'a' * 64,
+                      'base': 'b' * 40, 'branch': 'review-task-101', 'command': 'echo unsafe'}
+            path.write_text(json.dumps(record))
+            path.chmod(0o600)
+            with self.assertRaises(ValueError):
+                load_authorization(path)
+            del record['command']
+            path.write_text(json.dumps(record))
+            path.chmod(0o644)
+            with self.assertRaises(PermissionError):
+                load_authorization(path)
+
+    def test_authorization_open_refuses_symlink_swap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'auth.json'
+            target = Path(directory) / 'target.json'
+            target.write_text(json.dumps(asdict(self.policy)))
+            target.chmod(0o600)
+            path.write_text(target.read_text())
+            path.chmod(0o600)
+            actual_open = os.open
+            def swap_before_open(name, flags, *args, **kwargs):
+                if Path(name) == path:
+                    path.unlink()
+                    path.symlink_to(target)
+                return actual_open(name, flags, *args, **kwargs)
+            with patch('signal_desk.task_bridge.bridge.os.open', side_effect=swap_before_open):
+                with self.assertRaises(OSError):
+                    load_authorization(path)
+
+    def test_authorization_read_is_bounded_even_if_file_grows_after_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'auth.json'
+            path.write_text(json.dumps(asdict(self.policy)))
+            path.chmod(0o600)
+            actual_read = os.read
+            requested = []
+            def grow_before_read(fd, size):
+                requested.append(size)
+                with path.open('ab') as output:
+                    output.write(b' ' * 100000)
+                return actual_read(fd, size)
+            with patch('signal_desk.task_bridge.bridge.os.read', side_effect=grow_before_read):
+                with self.assertRaisesRegex(ValueError, 'bound|changed'):
+                    load_authorization(path)
+            self.assertEqual(requested, [2049])
+
+    def test_legacy_issue_22_bootstrap_is_not_new_authority(self):
+        with self.assertRaisesRegex(ValueError, 'authorization'):
+            Policy(self.policy.repo, 22, DIGEST, BASE, 'new-branch-for-old-issue')
+
+    def test_task_branch_cannot_be_the_protected_pr_target(self):
+        with self.assertRaisesRegex(ValueError, 'authorization'):
+            Policy(self.policy.repo, 101, DIGEST, BASE, 'main')
+
+    def test_authorization_file_drift_after_publication_blocks_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'auth.json'
+            path.write_text(json.dumps({'repo': self.policy.repo, 'issue': self.policy.issue,
+                                        'body_digest': self.policy.body_digest, 'base': self.policy.base,
+                                        'branch': self.policy.branch}))
+            path.chmod(0o600)
+            gh = FakeGitHub()
+            original_publish = gh.publish
+            def publish(repo, issue, text):
+                receipt = original_publish(repo, issue, text)
+                path.write_text(path.read_text().replace('review-task-101', 'review-task-102'))
+                return receipt
+            gh.publish = publish
+            result = Bridge(Path(directory) / 'state', load_authorization(path), gh,
+                            self.agent, auth_path=path).once()
+            self.assertEqual(result['status'], 'blocked')
+            self.assertEqual(self.agent.calls, 0)
+
+    def test_reconciliation_rejects_changed_authorization_file_without_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'auth.json'
+            record = {'repo': self.policy.repo, 'issue': 101, 'body_digest': DIGEST,
+                      'base': BASE, 'branch': self.policy.branch}
+            path.write_text(json.dumps(record))
+            path.chmod(0o600)
+            gh = FakeGitHub()
+            bridge = Bridge(Path(directory) / 'state', load_authorization(path), gh,
+                            self.agent, auth_path=path)
+            bridge.once()
+            before = list(gh.posts)
+            record['branch'] = 'review-task-102'
+            path.write_text(json.dumps(record))
+            observation = bridge.reconcile()
+            self.assertEqual(observation['status'], 'blocked')
+            self.assertIn('authorization changed', observation['reason'])
+            self.assertEqual(gh.posts, before)
+
+    def test_duplicate_fields_and_malformed_authorization_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'auth.json'
+            path.write_text('{"repo":"x","repo":"y"}')
+            path.chmod(0o600)
+            with self.assertRaises(ValueError):
+                load_authorization(path)
+            path.write_text('{bad json')
+            with self.assertRaises(ValueError):
+                load_authorization(path)
+
+    def test_journal_branch_worktree_and_identity_tampering_blocks_readers(self):
+        self.bridge().once()
+        for column, value in (('branch', 'different-branch'), ('worktree', '/elsewhere'),
+                              ('auth_identity', '0' * 64)):
+            with self.subTest(column=column):
+                with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+                    original = db.execute(f'SELECT {column} FROM runs').fetchone()[0]
+                    db.execute(f'UPDATE runs SET {column}=?', (value,))
+                self.assertEqual(self.bridge().once()['status'], 'blocked')
+                self.assertEqual(self.bridge().reconcile()['status'], 'blocked')
+                self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
+                with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+                    db.execute(f'UPDATE runs SET {column}=?', (original,))
+        self.assertEqual(self.agent.calls, 1)
 
 
 if __name__ == '__main__':

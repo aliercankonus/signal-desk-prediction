@@ -3,7 +3,7 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
-from .bridge import BASE, DIGEST, ISSUE, REPO, Bridge, Policy, doctor
+from .bridge import Bridge, load_authorization, doctor
 from .adapters import GitHubREST, HermesAgent
 
 
@@ -27,14 +27,25 @@ def main(argv=None):
     parser.add_argument('mode', choices=('doctor', 'reconcile', 'once'))
     parser.add_argument('--state', type=Path, required=True, help='private local directory outside the git checkout')
     parser.add_argument('--source', type=Path, help='development git checkout, required by once')
+    parser.add_argument('--auth', type=Path, help='reviewed private task authorization record')
     parser.add_argument('--execute-hermes', action='store_true', help='explicitly allow one real invocation')
     args = parser.parse_args(argv)
+    if args.mode == 'once' and not args.auth:
+        parser.error('once requires an independently reviewed --auth record; legacy bootstrap is not authority')
+    try:
+        policy = load_authorization(args.auth) if args.auth else None
+    except (OSError, ValueError, PermissionError):
+        parser.error('task authorization unavailable or invalid')
     if args.mode == 'doctor':
-        print(json.dumps(doctor(args.state)))
+        print(json.dumps(doctor(args.state, policy)))
         return 0
     if args.mode == 'reconcile':
         try:
-            result = Bridge(args.state, Policy(REPO, ISSUE, DIGEST, BASE), GitHubREST(), None).reconcile()
+            if policy is None:
+                print(json.dumps(doctor(args.state)))
+                return 0
+            result = Bridge(args.state, policy, GitHubREST(policy), None,
+                            auth_path=args.auth).reconcile()
         except Exception:
             parser.exit(1, 'remote inspection unavailable; local journal remains unchanged\n')
         print(json.dumps(result))
@@ -48,8 +59,10 @@ def main(argv=None):
     except (OSError, subprocess.SubprocessError):
         parser.error('source checkout unavailable')
     try:
-        result = Bridge(state, Policy(REPO, ISSUE, DIGEST, BASE), GitHubREST(),
-                        HermesAgent(source, state)).once()
+        if args.auth.resolve() == state or state in args.auth.resolve().parents or source in args.auth.resolve().parents:
+            parser.error('authorization must be separate from state and checkout')
+        result = Bridge(state, policy, GitHubREST(policy),
+                        HermesAgent(source, state, policy), auth_path=args.auth).once()
     except Exception:
         parser.exit(1, 'bridge blocked; inspect private state with doctor\n')
     print(json.dumps({key: result.get(key) for key in ('status', 'run_id', 'base', 'target_tip', 'head', 'pr_url', 'ci')}))
