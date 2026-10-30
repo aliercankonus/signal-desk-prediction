@@ -10,7 +10,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 from pathlib import Path
 
-from signal_desk.task_bridge.bridge import Bridge, Policy, doctor, load_authorization
+from signal_desk.task_bridge.bridge import Bridge, Policy, doctor, load_authorization, draft_title, draft_body
 from dataclasses import asdict
 
 BODY = (Path(__file__).parent / 'issue22.txt').read_text()
@@ -31,8 +31,11 @@ class FakeGitHub:
         self.edit_on_second_issue_read = False
         self.posts = []
         self.fail_post = set()
+        self.create_calls = []
         self.pr = {'url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
-                   'draft': True, 'head': HEAD, 'body': 'Refs #101',
+                   'number': 42, 'title': 'Task bridge draft for issue #101',
+                   'draft': True, 'head': HEAD,
+                   'body': 'Refs #101\n\nReviewed task branch: `review-task-101`.\n',
                    'pinned_start': BASE, 'target_tip': BASE, 'target_branch': 'main',
                    'target_repo': self.repo, 'ci': 'success', 'ci_head': HEAD}
 
@@ -44,6 +47,19 @@ class FakeGitHub:
 
     def draft_pr(self, repo, branch):
         return self.pr
+
+    def task_draft(self, repo, branch, head):
+        return self.pr
+
+    def create_task_draft(self, repo, branch, head):
+        self.create_calls.append((repo, branch, head))
+        self.pr = {'url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/42',
+                   'number': 42, 'title': 'Task bridge draft for issue #101',
+                   'draft': True, 'head': head,
+                   'body': 'Refs #101\n\nReviewed task branch: `review-task-101`.\n',
+                   'pinned_start': BASE, 'target_tip': BASE, 'target_branch': 'main',
+                   'target_repo': self.repo, 'ci': 'pending', 'ci_head': head}
+        return 42
 
     def publish(self, repo, number, text):
         if json.loads(text)['status'] in self.fail_post:
@@ -90,6 +106,216 @@ class BridgeTests(unittest.TestCase):
 
     def bridge(self, policy=None):
         return Bridge(self.state, policy or self.policy, self.github, self.agent, auth_path=self.auth_path)
+
+    def test_supervisor_creates_one_controlled_draft_after_child_success_without_gh(self):
+        self.github.pr = None
+        seen = []
+        original = self.agent.run
+        def capture(prompt, worktree):
+            seen.append(prompt)
+            return original(prompt, worktree)
+        self.agent.run = capture
+        result = self.bridge().once()
+        self.assertEqual(result['status'], 'review-ready')
+        self.assertEqual(result['ci'], 'pending')
+        self.assertEqual(self.github.create_calls, [(self.policy.repo, self.policy.branch, HEAD)])
+        self.assertIn('Do not require gh or create the task PR', seen[0])
+        self.assertLess(seen[0].index('Do not require gh'), seen[0].index(BODY))
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT stage,expected_head,number,url FROM pr_creations').fetchone(),
+                             ('verified', HEAD, 42, self.github.pr['url']))
+        self.assertEqual(self.bridge().once()['status'], 'review-ready')
+        self.assertEqual(len(self.github.create_calls), 1)
+
+    def test_matching_existing_draft_is_reused_without_any_post(self):
+        result = self.bridge().once()
+        self.assertEqual(result['status'], 'review-ready')
+        self.assertEqual(self.github.create_calls, [])
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT stage,expected_head,number FROM pr_creations').fetchone(),
+                             ('reused', HEAD, 42))
+
+    def test_conflicting_existing_draft_never_triggers_a_second_pr(self):
+        for key, value in (('head', 'e'*40), ('draft', False), ('body', 'Refs #101\nissue prose'),
+                           ('title', 'issue supplied title'), ('target_repo', 'elsewhere/repo'),
+                           ('number', 43)):
+            with self.subTest(key=key), tempfile.TemporaryDirectory() as directory:
+                gh, agent = FakeGitHub(), FakeAgent()
+                gh.pr[key] = value
+                bridge = Bridge(Path(directory) / 'state', self.policy, gh, agent, auth_path=self.auth_path)
+                self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(gh.create_calls, [])
+                self.assertEqual(doctor(bridge.state, self.policy)['status'], 'blocked')
+
+    def test_edited_issue_after_child_stops_before_pr_post(self):
+        self.github.pr = None
+        self.agent.action = lambda: setattr(self.github, 'body', 'edited after child')
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(self.github.create_calls, [])
+        self.assertIsNone(self.bridge()._pr_creation())
+
+    def test_issue_changed_during_post_cannot_be_reported_review_ready(self):
+        self.github.pr = None
+        original = self.github.create_task_draft
+        def change_after_post(repo, branch, head):
+            number = original(repo, branch, head)
+            self.github.body = 'edited while draft POST was in flight'
+            return number
+        self.github.create_task_draft = change_after_post
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(self.bridge()._pr_creation()['stage'], 'responded')
+        self.assertEqual(len(self.github.create_calls), 1)
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+
+    def test_ambiguous_post_stays_blocked_with_durable_intent_and_no_retry(self):
+        self.github.pr = None
+        original = self.github.create_task_draft
+        def ambiguous(repo, branch, head):
+            self.assertEqual(self.bridge()._pr_creation()['stage'], 'intent')
+            original(repo, branch, head)
+            raise TimeoutError('response lost after external effect')
+        self.github.create_task_draft = ambiguous
+        result = self.bridge().once()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(self.bridge()._pr_creation(),
+                         {'stage': 'intent', 'expected_head': HEAD, 'number': None, 'url': None})
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
+        self.assertEqual(doctor(self.state, self.policy)['pr_creation']['stage'], 'intent')
+        before = (self.state / 'journal.sqlite3').read_bytes()
+        observation = self.bridge().reconcile()
+        self.assertEqual(observation['pr_creation']['stage'], 'intent')
+        self.assertIn('draft result not journaled', observation['result_mismatch'])
+        self.assertEqual((self.state / 'journal.sqlite3').read_bytes(), before)
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(len(self.github.create_calls), 1)
+
+    def test_crash_after_post_response_preserves_stage_without_repost(self):
+        for method, expected in (('_pr_response', 'intent'), ('_pr_verified', 'responded')):
+            with self.subTest(method=method), tempfile.TemporaryDirectory() as directory:
+                gh, agent = FakeGitHub(), FakeAgent()
+                gh.pr = None
+                bridge = Bridge(Path(directory) / 'state', self.policy, gh, agent, auth_path=self.auth_path)
+                with patch.object(bridge, method, side_effect=KeyboardInterrupt):
+                    self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(bridge._pr_creation()['stage'], expected)
+                self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(len(gh.create_calls), 1)
+
+    def test_pr_readback_mismatch_or_bad_response_cannot_become_ready(self):
+        for failure in ('bad_response', 'wrong_number'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                gh, agent = FakeGitHub(), FakeAgent()
+                gh.pr = None
+                original = gh.create_task_draft
+                def create(repo, branch, head):
+                    original(repo, branch, head)
+                    if failure == 'wrong_number':
+                        gh.pr['number'] = 43
+                        return 42
+                    return None
+                gh.create_task_draft = create
+                bridge = Bridge(Path(directory) / 'state', self.policy, gh, agent, auth_path=self.auth_path)
+                self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(bridge._pr_creation()['stage'],
+                                 'responded' if failure == 'wrong_number' else 'intent')
+                self.assertEqual(doctor(bridge.state, self.policy)['status'], 'blocked')
+                self.assertEqual(len(gh.create_calls), 1)
+                self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(len(gh.create_calls), 1)
+
+    def test_verified_draft_with_failed_status_post_remains_blocked_without_retry(self):
+        self.github.pr = None
+        self.github.fail_post = {'review-ready'}
+        row = self.bridge().once()
+        self.assertEqual(row['status'], 'blocked')
+        self.assertEqual(row['head'], HEAD)
+        self.assertEqual(self.bridge()._pr_creation()['stage'], 'verified')
+        self.assertFalse(self.bridge().reconcile()['publication_consistent'])
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(len(self.github.create_calls), 1)
+
+    def test_duplicate_ready_rejects_missing_or_tampered_pr_receipt(self):
+        for field, value in (('stage', 'intent'), ('stage', 'responded'), ('number', 43)):
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as directory:
+                gh, agent = FakeGitHub(), FakeAgent()
+                bridge = Bridge(Path(directory) / 'state', self.policy, gh, agent, auth_path=self.auth_path)
+                self.assertEqual(bridge.once()['status'], 'review-ready')
+                with sqlite3.connect(bridge.state / 'journal.sqlite3') as db:
+                    if field == 'stage':
+                        db.execute('UPDATE pr_creations SET stage=?', (value,))
+                    else:
+                        db.execute('UPDATE pr_creations SET number=?', (value,))
+                self.assertEqual(doctor(bridge.state, self.policy)['status'], 'blocked')
+                self.assertEqual(bridge.once()['status'], 'blocked')
+                self.assertEqual(bridge.status()['status'], 'blocked')
+                self.assertEqual(gh.create_calls, [])
+
+    def test_reconcile_reports_corrupt_pr_creation_schema_without_crashing(self):
+        ready = self.bridge().once()
+        assert ready is not None
+        self.assertEqual(ready['status'], 'review-ready')
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            db.execute('DROP TABLE pr_creations')
+            db.execute('CREATE TABLE pr_creations (id INTEGER PRIMARY KEY)')
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
+        result = self.bridge().reconcile()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertTrue(result['pr_creation_inspection_unavailable'])
+        self.assertIn('PR publication receipt missing or invalid', result['result_mismatch'])
+
+    def test_reconcile_reports_multiple_pr_receipts_without_crashing(self):
+        ready = self.bridge().once()
+        assert ready is not None
+        self.assertEqual(ready['status'], 'review-ready')
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            db.execute('DROP TABLE pr_creations')
+            db.execute('CREATE TABLE pr_creations (id INTEGER PRIMARY KEY, stage TEXT, expected_head TEXT, number INTEGER, url TEXT)')
+            for id_ in (1, 2):
+                db.execute('INSERT INTO pr_creations VALUES (?,?,?,?,?)',
+                           (id_, 'reused', HEAD, 42, self.github.pr['url']))
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
+        result = self.bridge().reconcile()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertTrue(result['pr_creation_inspection_unavailable'])
+        self.assertIn('PR publication receipt missing or invalid', result['result_mismatch'])
+
+    def test_wrong_id_pr_receipt_never_verifies_review_ready(self):
+        ready = self.bridge().once()
+        assert ready is not None
+        self.assertEqual(ready['status'], 'review-ready')
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            db.execute('DROP TABLE pr_creations')
+            db.execute('CREATE TABLE pr_creations (id INTEGER PRIMARY KEY, stage TEXT, expected_head TEXT, number INTEGER, url TEXT)')
+            db.execute('INSERT INTO pr_creations VALUES (?,?,?,?,?)',
+                       (2, 'reused', HEAD, 42, self.github.pr['url']))
+        self.assertEqual(doctor(self.state, self.policy)['status'], 'blocked')
+        result = self.bridge().reconcile()
+        self.assertEqual(result['status'], 'blocked')
+        self.assertTrue(result['pr_creation_inspection_unavailable'])
+        duplicate = self.bridge().once()
+        assert duplicate is not None
+        self.assertEqual(duplicate['status'], 'blocked')
+
+    def test_changed_authority_during_draft_discovery_prevents_create_post(self):
+        for mutation in ('issue', 'authorization'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                gh, agent = FakeGitHub(), FakeAgent()
+                gh.pr = None  # type: ignore[assignment]
+                self.auth_path.write_text(json.dumps(asdict(self.policy)))
+                self.auth_path.chmod(0o600)
+                def discover(repo, branch, head):
+                    if mutation == 'issue':
+                        gh.state = 'closed'
+                    else:
+                        self.auth_path.write_text('{}')
+                    return None
+                gh.task_draft = discover  # type: ignore[assignment]
+                bridge = Bridge(Path(directory) / 'state', self.policy, gh, agent, auth_path=self.auth_path)
+                result = bridge.once()
+                assert result is not None
+                self.assertEqual(result['status'], 'blocked')
+                self.assertEqual(gh.create_calls, [])
+                self.assertEqual(doctor(bridge.state, self.policy)['status'], 'blocked')
 
     def test_direct_bridge_without_private_record_never_dispatches(self):
         result = Bridge(self.state, self.policy, self.github, self.agent).once()
@@ -445,7 +671,8 @@ class BridgeTests(unittest.TestCase):
                 gh, agent = FakeGitHub(), FakeAgent()
                 gh.policy = agent.policy = policy
                 gh.number, gh.body = number, body
-                gh.pr.update(body=f'Refs #{number}', pinned_start=record['base'])
+                gh.pr.update(body=draft_body(policy), title=draft_title(policy),
+                             pinned_start=record['base'])
                 agent.run = lambda prompt, worktree: {'head': HEAD, 'branch': policy.branch}
                 bridge = Bridge(Path(directory) / 'state', policy, gh, agent, auth_path=path)
                 self.assertEqual(bridge.once()['status'], 'review-ready')
