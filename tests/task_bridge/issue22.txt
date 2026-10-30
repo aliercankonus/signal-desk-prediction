@@ -1,0 +1,28 @@
+## Goal
+Replace manual task/result copying between the manager and Hermes with a small, auditable GitHub-backed development task flow. The user explicitly requested this priority after PR #21. This issue authorizes development and an inert proposal; it does not assert that a worker is installed or running.
+
+## Starting point
+Fetch origin; create a separate worktree from current origin/main. Verify ancestry includes a930a3c715635341e62538a3cc15a260162f6be9 (merged PR #21). Read SKILL.md. Preserve all existing worktrees, .env, local configuration, data, backups and protected releases.
+
+## First establish actual capabilities
+Inspect the installed Hermes version, documented noninteractive invocation, scheduler/task capabilities and available GitHub authentication from inside the existing Hermes environment. Use help/read-only inspection; do not reveal credentials. Report which invocation and polling mechanism were actually verified. Do not invent a Hermes command, assume a daemon exists, change Hermes skills/settings, install packages, or use the host gateway for this work. If safe programmatic invocation is unavailable, deliver the concrete capability finding and a reviewable adapter boundary rather than claiming working end-to-end execution.
+
+## Minimal v1 implementation
+- GitHub issue is the shared task and status location; linked draft PR is the deliverable. Do not create another trading engine or change ledger semantics.
+- One explicitly configured repository, one approved issue at a time, one Hermes worker instance. Start with this issue as the explicit allowlisted bootstrap task; no automatic discovery/execution of arbitrary issues or comments.
+- Task authorization must bind issue number, a frozen task-body digest/revision and a pinned code base. Edits invalidate an unstarted authorization. Issue content, comments and labels do not independently grant shell, credential, merge or deployment authority.
+- Use a local process lock and a durable bounded task/run journal outside git. Document that this guarantees exclusion only for this single worker/state directory; labels or check-then-write GitHub comments are not atomic distributed claims.
+- Persist run identity before agent invocation; record branch/worktree and progress. If restart leaves an ambiguous invocation or push result, inspect/reconcile it and block redispatch until resolved. Do not promise exactly-once external execution.
+- Use separate worktrees; never reset, clean, stash or overwrite an existing checkout. Bound work duration, retries, child-process lifetime, output size and retained logs. Interruption/timeout must terminate the process group and retain a recoverable task state.
+- Publish concise, redacted status to the authorized issue: queued/running/blocked/review-ready, run ID, pinned base, draft PR URL, exact head and exact-head CI result. Keep secrets, private config and host logs out of GitHub.
+- Keep merge, deployment, privileged host operations, collector startup and operator-data migration outside the worker's authorization. Use existing development credentials only within their actual permissions; do not claim logical restrictions revoke token capabilities.
+- Provide a read-only doctor/dry-run and a bounded once mode. Do not enable a persistent poller or schedule in this PR. Provide a separate explicit opt-in setup/stop/recovery procedure after review.
+- Keep documentation and task templates in English. Record current deployment remains unchanged.
+
+## Acceptance
+1. Synthetic/fake-agent tests: duplicate poll, simultaneous local worker starts, changed task body, disallowed repository/issue, interrupted invocation, timeout child cleanup, restart ambiguity, result publication failure, and redaction.
+2. An inert end-to-end fixture demonstrates approved task -> one fake invocation -> durable result -> draft-PR/status payload, without network or host effects. Test the production adapter separately against real installed help/capabilities; distinguish fixtures from actual Hermes execution.
+3. Full relevant repository tests pass; report exact head and read back GitHub CI.
+4. Open a draft PR linking this issue, with the verified capability findings, implemented scope, and one-time activation instructions. State clearly what was only tested and what is actually running.
+
+No VPS host commands, deployment, real execution, data migration, persistent scheduling or automatic merge. Development from inside the existing Hermes container and this task's GitHub status/draft-PR updates are authorized.
