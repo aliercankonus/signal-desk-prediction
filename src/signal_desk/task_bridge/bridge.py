@@ -159,7 +159,11 @@ def read_diagnostics(db):
 
 
 class Bridge:
-    def __init__(self, state, policy, github, agent, auth_path=None):
+    def __init__(self, state, policy, github, agent, auth_path=None, run_id=None):
+        if run_id is not None and (not isinstance(run_id, str) or
+                                   not re.fullmatch(r'[0-9a-f]{32}', run_id)):
+            raise ValueError('invalid preallocated run identity')
+        self.run_id = run_id
         self.state = Path(state)
         self.policy = policy
         self.github = github
@@ -410,7 +414,8 @@ class Bridge:
         if current:
             if current.get('reason'):
                 return current
-            if (current['repo'] != self.policy.repo or
+            if (self.run_id is not None and current['run_id'] != self.run_id) or (
+                current['repo'] != self.policy.repo or
                 current['issue_number'] != self.policy.issue or
                 current['base'] != self.policy.base or
                 current['body_digest'] != self.policy.body_digest or
@@ -458,7 +463,7 @@ class Bridge:
             not isinstance(issue['body'], str) or len(issue['body'].encode()) > 12000 or
             hashlib.sha256(issue['body'].encode('utf-8')).hexdigest() != p.body_digest):
             return {'status': 'blocked', 'reason': 'issue authorization mismatch'}
-        run_id = uuid.uuid4().hex
+        run_id = self.run_id or uuid.uuid4().hex
         branch = p.branch
         worktree = str(self.state / 'worktrees' / run_id)
         db = self.state / 'journal.sqlite3'
