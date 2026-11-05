@@ -1,0 +1,139 @@
+# REVIEW ONLY. Do not activate either service without separate host approval.
+name: hermes-autodev-supervisor
+x-common: &common
+  image: ${HERMES_IMAGE_REF:?Inspected immutable running Hermes image ID required}
+  user: "${HERMES_UID:?Inspected worker UID required}:${HERMES_GID:?Inspected worker GID required}"
+  init: true
+  entrypoint: ["/opt/hermes/.venv/bin/python"]
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=64m
+  stop_signal: SIGTERM
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+services:
+  supervisor:
+    <<: *common
+    container_name: hermes-autodev-supervisor
+    command: ["/opt/data/autonomous-development/orchestrator.py", "--store", "/opt/data/autonomous-development/tasks", "monitor"]
+    environment:
+      HOME: /tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+    network_mode: none
+    cpus: 0.1
+    mem_limit: 128m
+    pids_limit: 32
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${HERMES_CODE_HOST_PATH:?Inspected orchestration code path required}
+        target: /opt/data/autonomous-development
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_QUEUE_HOST_PATH:?Inspected persistent queue path required}
+        target: /opt/data/autonomous-development/tasks
+        read_only: true
+        bind: {create_host_path: false}
+  worker:
+    <<: *common
+    profiles: [execution]
+    container_name: hermes-autodev-worker
+    command: ["/opt/data/autonomous-development/orchestrator.py", "--store", "/opt/data/autonomous-development/tasks", "run", "--watch", "--allowed-repo", "${HERMES_WORKSPACE_PATH:?Exact approved container repository path required}"]
+    environment:
+      HOME: /worker-home
+      HERMES_HOME: /worker-home
+      TMPDIR: /tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+      HTTPS_PROXY: http://172.30.50.3:3128
+      HTTP_PROXY: http://172.30.50.3:3128
+      ALL_PROXY: http://172.30.50.3:3128
+      NO_PROXY: ""
+    working_dir: ${HERMES_WORKSPACE_PATH:?Exact approved container repository path required}
+    networks:
+      worker_isolated:
+        ipv4_address: 172.30.50.2
+    cpus: 1.0
+    mem_limit: 1536m
+    pids_limit: 128
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${HERMES_CODE_HOST_PATH:?Inspected orchestration code path required}
+        target: /opt/data/autonomous-development
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_QUEUE_HOST_PATH:?Inspected persistent queue path required}
+        target: /opt/data/autonomous-development/tasks
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_CHECKPOINT_HOST_PATH:?Inspected checkpoint path required}
+        target: /opt/data/development-checkpoints
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_WORKER_HOME_HOST_PATH:?Dedicated worker home path required}
+        target: /worker-home
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_CONFIG_HOST_PATH:?Existing config path required}
+        target: /worker-home/config.yaml
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_SKILLS_HOST_PATH:?Existing skills directory path required}
+        target: /worker-home/skills
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_MEMORIES_HOST_PATH:?Existing memories directory path required}
+        target: /worker-home/memories
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HERMES_WORKSPACE_HOST_PATH:?Inspected approved repository source path required}
+        target: ${HERMES_WORKSPACE_PATH:?Exact approved container repository path required}
+        bind: {create_host_path: false}
+  codex-proxy:
+    <<: *common
+    profiles: [execution]
+    container_name: hermes-autodev-codex-proxy
+    user: "65534:65534"
+    command: ["/opt/proxy.py"]
+    environment:
+      HOME: /tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+    networks:
+      worker_isolated:
+        ipv4_address: 172.30.50.3
+      proxy_uplink: {}
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${HERMES_CODE_HOST_PATH:?Inspected orchestration code path required}/codex_connect_proxy.py
+        target: /opt/proxy.py
+        read_only: true
+        bind: {create_host_path: false}
+networks:
+  worker_isolated:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-autodev
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config:
+        - subnet: 172.30.50.0/28
+  proxy_uplink:
+    external: true
+    name: bridge

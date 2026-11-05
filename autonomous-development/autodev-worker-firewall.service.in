@@ -1,0 +1,15 @@
+# HOST TEMPLATE ONLY. Replace @CODE_HOST_PATH@ after inspection; never enable from Hermes.
+[Unit]
+Description=Scoped autonomous worker firewall (worker bridge only)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=AUTODEV_FIREWALL_APPROVED=yes-for-reviewed-network
+ExecStart=/bin/bash @CODE_HOST_PATH@/worker_firewall.sh apply
+ExecStop=/bin/bash @CODE_HOST_PATH@/worker_firewall.sh rollback
+
+[Install]
+WantedBy=multi-user.target
