@@ -1,0 +1,4 @@
+# Nonsecret template for dedicated /worker-home/gitconfig; no Git identity here.
+[credential "https://github.com"]
+    helper = store --file /worker-home/git-credentials
+    useHttpPath = false
