@@ -3,13 +3,22 @@ import hashlib
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
+import pytest
 from signal_desk.task_bridge.bridge import Policy
 
 WORKER = Path(__file__).resolve().parents[2] / 'autonomous-development'
 sys.path.insert(0, str(WORKER))
 from queue_store import TaskStore
+
+
+@pytest.fixture
+def tmp_path():
+    """Use a real private ancestor chain, independent of pytest's /tmp base."""
+    with tempfile.TemporaryDirectory(prefix='bridge-queue-test-', dir=Path.home()) as location:
+        yield Path(location)
 
 
 def test_selected_worker_queue_has_no_legacy_agent_launcher():
@@ -37,6 +46,18 @@ def test_queue_rejects_public_existing_root(tmp_path):
     root.mkdir(mode=0o755)
     with pytest.raises(PermissionError):
         TaskStore(root)
+
+
+def test_queue_rejects_sticky_shared_temp_ancestor():
+    import stat
+    import uuid
+    shared = Path('/tmp')
+    mode = shared.stat().st_mode
+    assert stat.S_ISDIR(mode) and mode & stat.S_ISVTX and mode & 0o022
+    root = shared / ('bridge-queue-denied-' + uuid.uuid4().hex)
+    with pytest.raises(PermissionError, match='ancestor'):
+        TaskStore(root)
+    assert not root.exists()
 
 
 def test_new_queue_root_is_synced_to_parent(tmp_path, monkeypatch):
@@ -72,20 +93,19 @@ def test_queue_rechecks_parent_privacy_before_claim(tmp_path):
 def test_queue_rejects_a_parent_owned_by_another_unprivileged_uid(tmp_path, monkeypatch):
     import os
     import pytest
-    import queue_store
     foreign = tmp_path / 'foreign'
     foreign.mkdir(mode=0o700)
-    original = queue_store.os.lstat
+    original = Path.lstat
 
     def changed_owner(path, *args, **kwargs):
         info = original(path, *args, **kwargs)
-        if os.fspath(path) == str(foreign):
+        if path == foreign:
             fields = list(info)
             fields[4] = os.geteuid() + 1
             return os.stat_result(fields)
         return info
 
-    monkeypatch.setattr(queue_store.os, 'lstat', changed_owner)
+    monkeypatch.setattr(Path, 'lstat', changed_owner)
     with pytest.raises(PermissionError):
         TaskStore(foreign / 'queue')
 
