@@ -21,6 +21,71 @@ BIND_ADDRESS = '172.30.50.3'
 PORT = 3128
 MAX_HEADER = 4096
 MAX_CONNECTIONS = 16
+MAX_BUFFER = 65536
+
+
+def relay_bidirectional(client, upstream, *, buffer_limit=MAX_BUFFER,
+                        idle_timeout=180, total_timeout=3900) -> tuple[int, int]:
+    """Drain two bounded queues; propagate EOF only after queued bytes are sent.
+
+    Returns per-destination peak queued bytes for offline regression assertions.
+    The relay owns socket shutdown, while the handler owns descriptor closure.
+    """
+    if not 0 < buffer_limit <= MAX_BUFFER or idle_timeout <= 0 or total_timeout <= 0:
+        raise ValueError('invalid relay bounds')
+    peers = (client, upstream)
+    pending = {client: bytearray(), upstream: bytearray()}
+    reading = {client: True, upstream: True}
+    write_closed = {client: False, upstream: False}
+    peak = {client: 0, upstream: 0}
+    started = last_progress = time.monotonic()
+    for sock in peers:
+        sock.setblocking(False)
+    try:
+        while True:
+            for source, destination in ((client, upstream), (upstream, client)):
+                if not reading[source] and not pending[destination] and not write_closed[destination]:
+                    destination.shutdown(socket.SHUT_WR)
+                    write_closed[destination] = True
+            if not any(reading.values()) and not any(pending.values()):
+                return peak[client], peak[upstream]
+            remaining = min(started + total_timeout, last_progress + idle_timeout) - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('relay deadline exceeded')
+            readable = [source for source, destination in ((client, upstream), (upstream, client))
+                        if reading[source] and len(pending[destination]) < buffer_limit]
+            writable = [sock for sock in peers if pending[sock]]
+            ready_read, ready_write, _ = select.select(readable, writable, [], remaining)
+            for sock in ready_write:
+                try:
+                    sent = sock.send(pending[sock])
+                except BlockingIOError:
+                    continue
+                if sent == 0:
+                    raise ConnectionError('relay peer closed during write')
+                del pending[sock][:sent]
+                last_progress = time.monotonic()
+            for source in ready_read:
+                destination = upstream if source is client else client
+                capacity = buffer_limit - len(pending[destination])
+                if capacity <= 0:
+                    continue
+                try:
+                    chunk = source.recv(min(65536, capacity))
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    pending[destination].extend(chunk)
+                    peak[destination] = max(peak[destination], len(pending[destination]))
+                else:
+                    reading[source] = False
+                last_progress = time.monotonic()
+    finally:
+        for sock in peers:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
 
 def parse_connect_target(target: str) -> tuple[str, int]:
@@ -48,6 +113,7 @@ class Handler(socketserver.BaseRequestHandler):
         if self.client_address[0] != WORKER_ADDRESS:
             return
         data = bytearray()
+        established = False
         try:
             while not data.endswith(b'\r\n\r\n') and len(data) < MAX_HEADER:
                 chunk = client.recv(1)
@@ -68,24 +134,16 @@ class Handler(socketserver.BaseRequestHandler):
             records = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
             ip, resolved_port = choose_public_address(records)
             with socket.create_connection((ip, resolved_port), timeout=10) as upstream:
+                # Even a partial 200 response forbids a later HTTP error in TLS bytes.
+                established = True
                 client.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
-                client.setblocking(False)
-                upstream.setblocking(False)
-                deadline = time.monotonic() + 3900
-                while time.monotonic() < deadline:
-                    readable, _, _ = select.select([client, upstream], [], [], 180)
-                    if not readable:
-                        return
-                    for source in readable:
-                        chunk = source.recv(65536)
-                        if not chunk:
-                            return
-                        (upstream if source is client else client).sendall(chunk)
+                relay_bidirectional(client, upstream)
         except (OSError, ValueError, UnicodeError):
-            try:
-                client.sendall(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n')
-            except OSError:
-                pass
+            if not established:
+                try:
+                    client.sendall(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n')
+                except OSError:
+                    pass
             # Never log target, headers, tokens, request bodies, or upstream exceptions.
 
 

@@ -3,8 +3,13 @@ from pathlib import Path
 import ast
 import importlib.util
 import os
+import socket
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -105,6 +110,188 @@ def test_firewall_is_scoped_to_one_shot_network():
     assert 'SD_ONCE_FWD' in text
     assert 'AUTODEV_FWD' not in text
     assert 'iptables -F' not in text
+
+
+def test_relay_drains_both_directions_under_forced_partial_writes():
+    proxy = load_proxy()
+    class ShortWriter:
+        def __init__(self, sock):
+            self.sock, self.calls = sock, 0
+        def fileno(self): return self.sock.fileno()
+        def setblocking(self, flag): return self.sock.setblocking(flag)
+        def recv(self, size): return self.sock.recv(size)
+        def shutdown(self, how): return self.sock.shutdown(how)
+        def send(self, data):
+            self.calls += 1
+            if self.calls % 7 == 0:
+                raise BlockingIOError()
+            return self.sock.send(data[:17])
+
+    client_peer, client_relay = socket.socketpair()
+    upstream_relay, upstream_peer = socket.socketpair()
+    sockets = (client_peer, client_relay, upstream_relay, upstream_peer)
+    try:
+        for sock in sockets:
+            sock.settimeout(8)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024)
+        client, upstream = ShortWriter(client_relay), ShortWriter(upstream_relay)
+        outbound = bytes(range(256)) * 512
+        inbound = bytes(reversed(range(256))) * 512
+
+        def send_then_eof(sock, payload):
+            sock.sendall(payload)
+            sock.shutdown(socket.SHUT_WR)
+
+        def slow_receive(sock):
+            chunks = []
+            while chunk := sock.recv(113):
+                chunks.append(chunk)
+                time.sleep(0.0002)
+            return b''.join(chunks)
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            relay = pool.submit(proxy.relay_bidirectional, client, upstream,
+                                buffer_limit=2048, idle_timeout=3, total_timeout=12)
+            sent_c = pool.submit(send_then_eof, client_peer, outbound)
+            sent_u = pool.submit(send_then_eof, upstream_peer, inbound)
+            read_c = pool.submit(slow_receive, client_peer)
+            read_u = pool.submit(slow_receive, upstream_peer)
+            sent_c.result(timeout=10)
+            sent_u.result(timeout=10)
+            assert read_c.result(timeout=10) == inbound
+            assert read_u.result(timeout=10) == outbound
+            assert max(relay.result(timeout=10)) <= 2048
+        assert client.calls > 100 and upstream.calls > 100
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
+def test_relay_preserves_delayed_response_after_request_half_close():
+    proxy = load_proxy()
+    caller, client_relay = socket.socketpair()
+    upstream_relay, remote = socket.socketpair()
+    try:
+        caller.settimeout(2)
+        remote.settimeout(2)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            relay = pool.submit(proxy.relay_bidirectional, client_relay, upstream_relay,
+                                buffer_limit=31, idle_timeout=1, total_timeout=4)
+            caller.sendall(b'request' * 257)
+            caller.shutdown(socket.SHUT_WR)
+            request = bytearray()
+            while part := remote.recv(97):
+                request.extend(part)
+            assert request == b'request' * 257
+            remote.sendall(b'response' * 263)
+            remote.shutdown(socket.SHUT_WR)
+            response = bytearray()
+            while part := caller.recv(101):
+                response.extend(part)
+            assert response == b'response' * 263
+            assert max(relay.result(timeout=2)) <= 31
+    finally:
+        for sock in (caller, client_relay, upstream_relay, remote):
+            sock.close()
+
+
+def test_relay_total_deadline_wins_over_continuous_progress():
+    proxy = load_proxy()
+    caller, client_relay = socket.socketpair()
+    upstream_relay, remote = socket.socketpair()
+    stopped = threading.Event()
+    def trickle():
+        try:
+            while not stopped.wait(0.01):
+                caller.sendall(b'x')
+        except OSError:
+            pass
+    thread = threading.Thread(target=trickle, daemon=True)
+    try:
+        remote.settimeout(1)
+        thread.start()
+        with pytest.raises(TimeoutError):
+            proxy.relay_bidirectional(client_relay, upstream_relay,
+                                      buffer_limit=32, idle_timeout=0.2, total_timeout=0.1)
+        assert remote.recv(64)  # Progress occurred before the total deadline.
+        caller.settimeout(1)
+        assert caller.recv(1) == b''
+    finally:
+        stopped.set()
+        thread.join(1)
+        for sock in (caller, client_relay, upstream_relay, remote):
+            sock.close()
+
+
+def test_relay_idle_timeout_shuts_down_both_peers():
+    proxy = load_proxy()
+    client_peer, client_relay = socket.socketpair()
+    upstream_relay, upstream_peer = socket.socketpair()
+    try:
+        with pytest.raises(TimeoutError):
+            proxy.relay_bidirectional(client_relay, upstream_relay,
+                                      buffer_limit=32, idle_timeout=0.05, total_timeout=1)
+        client_peer.settimeout(1)
+        upstream_peer.settimeout(1)
+        assert client_peer.recv(1) == b''
+        assert upstream_peer.recv(1) == b''
+    finally:
+        for sock in (client_peer, client_relay, upstream_relay, upstream_peer):
+            sock.close()
+
+
+def test_established_tunnel_error_never_appends_http_403():
+    proxy = load_proxy()
+    caller, server_side = socket.socketpair()
+    upstream, remote = socket.socketpair()
+    result = []
+    def serve():
+        try:
+            proxy.Handler(server_side, (proxy.WORKER_ADDRESS, 12345), object())
+        finally:
+            server_side.close()
+            result.append(True)
+    try:
+        with patch.object(proxy.socket, 'getaddrinfo', return_value=[
+                 (socket.AF_INET, socket.SOCK_STREAM, 6, '', ('140.82.112.3', 443))]), \
+             patch.object(proxy.socket, 'create_connection', return_value=upstream), \
+             patch.object(proxy, 'relay_bidirectional', side_effect=OSError('synthetic relay failure')):
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            caller.settimeout(2)
+            caller.sendall(b'CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n')
+            response = bytearray()
+            while chunk := caller.recv(1024):
+                response.extend(chunk)
+            thread.join(2)
+            assert result and not thread.is_alive()
+            assert bytes(response) == b'HTTP/1.1 200 Connection Established\r\n\r\n'
+    finally:
+        caller.close()
+        remote.close()
+        upstream.close()
+
+
+def test_rejected_connect_still_receives_http_403():
+    proxy = load_proxy()
+    caller, server_side = socket.socketpair()
+    def serve():
+        try:
+            proxy.Handler(server_side, (proxy.WORKER_ADDRESS, 12345), object())
+        finally:
+            server_side.close()
+    try:
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        caller.settimeout(2)
+        caller.sendall(b'CONNECT forbidden.example:443 HTTP/1.1\r\n\r\n')
+        response = caller.recv(1024)
+        thread.join(2)
+        assert not thread.is_alive()
+        assert response.startswith(b'HTTP/1.1 403 Forbidden\r\n')
+    finally:
+        caller.close()
+        server_side.close()
 
 
 def test_one_shot_compose_has_no_legacy_worker_or_unbounded_service():
