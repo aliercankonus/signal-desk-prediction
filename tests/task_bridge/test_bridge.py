@@ -107,6 +107,18 @@ class BridgeTests(unittest.TestCase):
     def bridge(self, policy=None):
         return Bridge(self.state, policy or self.policy, self.github, self.agent, auth_path=self.auth_path)
 
+    def test_preallocated_run_identity_is_journaled_and_conflicting_reentry_blocks(self):
+        selected = 'c' * 32
+        first = Bridge(self.state, self.policy, self.github, self.agent,
+                       auth_path=self.auth_path, run_id=selected).once()
+        self.assertEqual(first['run_id'], selected)
+        with sqlite3.connect(self.state / 'journal.sqlite3') as db:
+            self.assertEqual(db.execute('SELECT run_id FROM runs').fetchone()[0], selected)
+        wrong = Bridge(self.state, self.policy, self.github, self.agent,
+                       auth_path=self.auth_path, run_id='d' * 32).once()
+        self.assertEqual(wrong['status'], 'blocked')
+        self.assertEqual(self.agent.calls, 1)
+
     def test_supervisor_creates_one_controlled_draft_after_child_success_without_gh(self):
         self.github.pr = None
         seen = []
