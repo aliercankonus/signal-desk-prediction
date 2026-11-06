@@ -103,6 +103,21 @@ def test_network_preflight_rejects_overlapping_route_without_host_calls():
                                 [{'dst': '172.30.50.0/24'}], []) == ['route 172.30.50.0/24']
 
 
+def test_network_preflight_checks_both_subnets_and_bridge_interfaces_offline():
+    spec = importlib.util.spec_from_file_location('one_shot_network_preflight',
+                                                  DESIGN / 'network_preflight.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    routes = [{'dst': '172.30.51.0/24'}]
+    networks = [{'IPAM': {'Config': [{'Subnet': '172.30.50.0/24'}]}}]
+    links = [{'ifname': 'br-sd-uplink'}]
+    conflicts = module.check_proposals(routes, networks, links)
+    assert 'worker_isolated: docker 172.30.50.0/24' in conflicts
+    assert 'proxy_uplink: route 172.30.51.0/24' in conflicts
+    assert 'proxy_uplink: host interface br-sd-uplink already exists' in conflicts
+    assert module.check_proposals([], [], []) == []
+
+
 def test_firewall_is_scoped_to_one_shot_network():
     text = (DESIGN / 'worker_firewall.sh').read_text()
     assert 'signal-desk-bridge-once' in text
@@ -318,3 +333,67 @@ def test_one_shot_compose_has_no_legacy_worker_or_unbounded_service():
             assert '/var/run/docker.sock' not in volume['target']
     assert all('orchestrator.py' not in str(s) and 'execute_task' not in str(s)
                for s in services.values())
+
+
+def test_proxy_uplink_is_dedicated_attempt_owned_bridge_not_default_bridge():
+    design = yaml.safe_load((DESIGN / 'compose.yml').read_text())
+    networks = design['networks']
+    assert set(networks) == {'worker_isolated', 'proxy_uplink'}
+    assert set(design['services']['bridge-once']['networks']) == {'worker_isolated'}
+    assert set(design['services']['connect-proxy']['networks']) == set(networks)
+    uplink = networks['proxy_uplink']
+    assert uplink.get('external') is not True
+    assert uplink['driver'] == 'bridge'
+    assert uplink['internal'] is False
+    assert uplink['enable_ipv6'] is False
+    assert uplink['ipam']['config'] == [{'subnet': '172.30.51.0/28'}]
+    assert uplink['driver_opts']['com.docker.network.bridge.name'] == 'br-sd-uplink'
+    assert uplink.get('name') != 'bridge'
+
+
+def test_cleanup_identifies_both_empty_attempt_networks_even_with_zero_proxy():
+    spec = importlib.util.spec_from_file_location('one_shot_network_resources',
+                                                  DESIGN / 'network_resources.py')
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for role, subnet, internal, interface in (
+        ('worker_isolated', '172.30.50.0/28', True, 'br-sd-once'),
+        ('proxy_uplink', '172.30.51.0/28', False, 'br-sd-uplink'),
+    ):
+        record = {
+            'Id': role + '-id', 'Name': 'signal-desk-bridge-once_' + role,
+            'Labels': {'com.docker.compose.project': 'signal-desk-bridge-once',
+                       'com.docker.compose.network': role},
+            'Driver': 'bridge', 'Internal': internal, 'EnableIPv6': False,
+            'Options': {'com.docker.network.bridge.name': interface,
+                        **({'com.docker.network.bridge.gateway_mode_ipv4': 'isolated'}
+                           if internal else {})},
+            'IPAM': {'Config': [{'Subnet': subnet}]}, 'Containers': {},
+        }
+        assert module.validate_attempt_network(record, role) == role + '-id'
+        with pytest.raises(ValueError):
+            module.validate_attempt_network({**record, 'Containers': {'foreign': {}}}, role)
+        with pytest.raises(ValueError):
+            module.validate_attempt_network({**record, 'Name': 'bridge'}, role)
+        with pytest.raises(ValueError):
+            module.validate_attempt_network({**record, 'Labels': {}}, role)
+
+
+def test_host_procedure_removes_both_owned_networks_after_zero_proxy_startup():
+    text = (DESIGN / 'network_acceptance_host.sh').read_text()
+    assert 'worker_isolated proxy_uplink' in text
+    assert 'network_resources.py" --role "$role"' in text
+    assert 'ZERO_PROXY' in text
+    assert 'docker network rm "$network_id"' in text
+    assert 'docker compose down' not in text
+    assert 'docker network rm bridge' not in text
+    assert 'connect-proxy' in text and 'bridge-once bridge-once' not in text
+
+
+def test_host_cleanup_attempts_other_empty_owned_network_after_one_mismatch():
+    text = (DESIGN / 'network_acceptance_host.sh').read_text()
+    cleanup_loop = text.split('# Network creation may have succeeded before proxy creation failed.', 1)[1]
+    cleanup_loop = cleanup_loop.split('if [[ "$residual" == 0 ]]; then', 1)[0]
+    assert 'for role in worker_isolated proxy_uplink; do' in cleanup_loop
+    assert 'break' not in cleanup_loop
