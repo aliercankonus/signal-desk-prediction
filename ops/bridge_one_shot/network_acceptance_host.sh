@@ -134,7 +134,7 @@ cleanup() {
     [[ "$(timeout 10s docker network ls --no-trunc -q | sort)" == "$NETWORK_BASELINE" ]] || residual=1
   fi
   if [[ "$residual" == 0 ]]; then
-    printf 'CLEANUP VERIFIED: only new fixture/proxy/firewall/two networks removed; existing container and network IDs unchanged\n'
+    printf 'CLEANUP VERIFIED: attempt-owned networks absent; existing container and network IDs unchanged\n'
     if [[ "$prior" == 0 && "$FIXTURE_PASSED" == 1 ]]; then
       printf 'CREDENTIAL-FREE NETWORK FIXTURE: PASS; firewall DROP counters observed=%s\n' "$COUNTERS_OBSERVED"
       [[ "$COUNTERS_OBSERVED" == 1 ]] || printf 'Firewall packet path unobserved (isolated routes may reject first); no full host GO\n'

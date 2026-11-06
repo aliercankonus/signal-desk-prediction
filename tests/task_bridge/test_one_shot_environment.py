@@ -397,3 +397,8 @@ def test_host_cleanup_attempts_other_empty_owned_network_after_one_mismatch():
     cleanup_loop = cleanup_loop.split('if [[ "$residual" == 0 ]]; then', 1)[0]
     assert 'for role in worker_isolated proxy_uplink; do' in cleanup_loop
     assert 'break' not in cleanup_loop
+
+
+def test_host_cleanup_success_message_does_not_claim_two_networks_were_created():
+    text = (DESIGN / 'network_acceptance_host.sh').read_text()
+    assert 'CLEANUP VERIFIED: attempt-owned networks absent' in text
