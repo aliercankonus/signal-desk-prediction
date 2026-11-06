@@ -34,11 +34,12 @@ for d in "$QUEUE" "$AUTH" "$CONTEXT" "$HOME_DIR"; do
 done
 # Operator independently stages and verifies every merged blob BEFORE invoking this script.
 # Recheck all directly consumed helpers against the separately protected merged object store.
-for file in compose.yml connect_proxy.py network_acceptance.py network_preflight.py network_resources.py worker_firewall.sh network_acceptance_host.sh; do
+for file in compose.yml connect_proxy.py network_acceptance.py network_preflight.py network_resources.py canary_lifecycle.sh host_canary.py worker_firewall.sh network_acceptance_host.sh; do
   [[ "$(timeout 10s git --git-dir="$SOURCE" show "$REVIEW_MERGE:ops/bridge_one_shot/$file" | sha256sum | cut -d' ' -f1)" == "$(sha256sum "$REVIEW/$file" | cut -d' ' -f1)" ]] || {
     printf 'STOP: staged helper differs from merged blob: %s\n' "$file" >&2; exit 2;
   }
 done
+source "$REVIEW/canary_lifecycle.sh"
 export HERMES_IMAGE_REF="$IMAGE" HERMES_UID=10000 HERMES_GID=10000
 export BRIDGE_REVIEW_HOST="$REVIEW" BRIDGE_RUNNER_HOST="$RUNNER" BRIDGE_QUEUE_HOST="$QUEUE"
 export BRIDGE_AUTH_DIR_HOST="$AUTH" BRIDGE_CONTEXT_DIR_HOST="$CONTEXT"
@@ -59,7 +60,8 @@ NETWORK_BASELINE="$(timeout 10s docker network ls --no-trunc -q | sort)"
 timeout 30s python3 -I -B "$REVIEW/network_preflight.py"
 read -r TOKEN </proc/sys/kernel/random/uuid
 FIX_NAME="sd-issue41-net-$TOKEN"
-CANARY_PID=''; PROXY_STARTED=0; FW_ATTEMPTED=0; FIX_ATTEMPTED=0; FIXTURE_PASSED=0; COUNTERS_OBSERVED=0
+CANARY_OWNER_PID='' CANARY_READ_FD='' CANARY_WRITE_FD=''
+PROXY_STARTED=0; FW_ATTEMPTED=0; FIX_ATTEMPTED=0; FIXTURE_PASSED=0; COUNTERS_OBSERVED=0
 # Cleanup on success/failure; never stop/remove an unidentified resource or flush global rules.
 cleanup() {
   local prior=$? residual=0 fid fmeta pid pmeta peers current role ids network_id interface
@@ -80,15 +82,7 @@ cleanup() {
       fi
     fi
   fi
-  if [[ -n "$CANARY_PID" ]]; then
-    if jobs -pr | grep -Fxq "$CANARY_PID"; then kill -TERM "$CANARY_PID" 2>/dev/null; fi
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      jobs -pr | grep -Fxq "$CANARY_PID" || break
-      sleep 0.2
-    done
-    if jobs -pr | grep -Fxq "$CANARY_PID"; then kill -KILL "$CANARY_PID" 2>/dev/null; fi
-    wait "$CANARY_PID" 2>/dev/null
-  fi
+  canary_stop || residual=1
   if [[ "$FW_ATTEMPTED" == 1 ]]; then
     if timeout 15s bash "$REVIEW/worker_firewall.sh" status >/dev/null 2>&1; then
       AUTODEV_FIREWALL_APPROVED=yes-for-reviewed-network timeout 25s bash "$REVIEW/worker_firewall.sh" rollback || residual=1
@@ -176,44 +170,17 @@ FWD_BEFORE=$(drop_pkts SD_ONCE_FWD)
 # Owned, bounded host canary. READY is emitted only after this child's bind/listen.
 # A preoccupied port emits BIND_FAILED; never probe it as a presumed test listener.
 coproc CANARY {
-  exec python3 -I -B -u - "$HOST_IP" "$HOST_PORT" "$TOKEN" <<'PY'
-import socket,sys,time
-ip,port,token=sys.argv[1],int(sys.argv[2]),sys.argv[3].encode('ascii')
-s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-try:
-    s.bind((ip,port))  # no SO_REUSEPORT or replacement of an existing listener
-    s.listen(4)
-except OSError:
-    print('BIND_FAILED',flush=True)
-    s.close()
-    sys.exit(2)
-print('READY '+token.decode('ascii'),flush=True)
-s.settimeout(2)
-end=time.monotonic()+150
-while time.monotonic()<end:
-    try:
-        c,_=s.accept()
-    except socket.timeout:
-        continue
-    with c:
-        c.settimeout(2)
-        try:
-            if c.makefile('rb').readline(128)==token+b'\n':
-                c.sendall(b'CANARY-OK '+token+b'\n')
-                print('HOST_CANARY_CHALLENGE_OK',flush=True)
-        except OSError:
-            pass
-s.close()
-PY
+  exec timeout --signal=TERM --kill-after=5s 155s python3 -I -B -u "$REVIEW/host_canary.py" "$HOST_IP" "$HOST_PORT" "$TOKEN"
 }
+canary_capture || { printf 'NO-GO: canary exited before coprocess metadata snapshot\n' >&2; exit 2; }
 CANARY_READY=0
-if ! read -r -t 5 -u "${CANARY[0]}" CANARY_LINE; then
+if ! canary_read CANARY_LINE 5; then
   printf 'NO-GO: owned host canary gave no bounded bind/readiness result\n' >&2; exit 2
 fi
 if [[ "$CANARY_LINE" == BIND_FAILED ]]; then
   printf 'NO-GO: canary bind failed; do not connect to a preoccupied endpoint\n' >&2; exit 2
 fi
-if [[ "$CANARY_LINE" == "READY $TOKEN" ]] && kill -0 "$CANARY_PID" 2>/dev/null; then
+if [[ "$CANARY_LINE" == "READY $TOKEN" ]] && canary_is_live; then
   # The response, not a generic successful TCP handshake, proves endpoint ownership.
   timeout 5s python3 -I -B -c '
 import socket,sys
@@ -223,7 +190,7 @@ with socket.create_connection((ip,port),timeout=2) as s:
     assert s.makefile("rb").readline(128)==b"CANARY-OK "+token+b"\n"
 print("HOST_CANARY_CHALLENGE_VERIFIED")
 ' "$HOST_IP" "$HOST_PORT" "$TOKEN"
-  if read -r -t 5 -u "${CANARY[0]}" CANARY_ACK && [[ "$CANARY_ACK" == HOST_CANARY_CHALLENGE_OK ]] && kill -0 "$CANARY_PID" 2>/dev/null; then
+  if canary_read CANARY_ACK 5 && [[ "$CANARY_ACK" == HOST_CANARY_CHALLENGE_OK ]] && canary_is_live; then
     CANARY_READY=1
   fi
 fi
@@ -242,7 +209,7 @@ if timeout --signal=TERM --kill-after=5s 110s docker run \
 else
   rc=$?; printf 'NO-GO: fixture exit=%s (124=outer timeout)\n' "$rc" >&2; exit "$rc"
 fi
-kill -0 "$CANARY_PID" 2>/dev/null || { printf 'NO-GO: owned host canary exited before negative check completed\n' >&2; exit 2; }
+canary_is_live || { printf 'NO-GO: owned host canary exited before negative check completed\n' >&2; exit 2; }
 IN_AFTER=$(drop_pkts SD_ONCE_IN); FWD_AFTER=$(drop_pkts SD_ONCE_FWD)
 if [[ "$IN_AFTER" -gt "$IN_BEFORE" && "$FWD_AFTER" -gt "$FWD_BEFORE" ]]; then
   COUNTERS_OBSERVED=1
