@@ -109,5 +109,10 @@ networks:
     ipam:
       config: [{subnet: 172.30.50.0/28}]
   proxy_uplink:
-    external: true
-    name: bridge
+    driver: bridge
+    internal: false
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-sd-uplink
+    ipam:
+      config: [{subnet: 172.30.51.0/28}]
