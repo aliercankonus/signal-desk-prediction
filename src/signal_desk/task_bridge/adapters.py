@@ -1,10 +1,12 @@
 """Optional production boundaries; never invoke a real agent in tests."""
 import subprocess
 import time
+import hashlib
 import os
 import signal
 import json
 import re
+import shlex
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -12,6 +14,7 @@ from typing import Callable
 from .bridge import Policy, REPO, draft_title, draft_body
 from .context import (load_execution_context, validate_execution_context,
                       write_task_context, trusted_context_prompt)
+from .recovery import checkpoint
 
 
 class AgentTerminationError(RuntimeError):
@@ -96,15 +99,66 @@ class HermesAgent:
             if not identity:
                 raise ValueError('task Git author/committer identity missing')
         write_task_context(self.state, path, self._approved_context)
+        # Read the reviewed runbook from the pinned source, never from issue prose.
+        recovery_path = Path(__file__).resolve().parents[3] / 'docs' / 'HERMES_SESSION_RECOVERY.md'
+        recovery = recovery_path.read_bytes()
+        if not recovery or len(recovery) > 8192:
+            raise ValueError('pinned recovery contract unavailable or changed')
+        # In production the loaded module and runner checkout coincide; check
+        # the document's committed bytes too. Inert fixtures have separate roots.
+        if Path(self.source).resolve() == Path(__file__).resolve().parents[3] and recovery != subprocess.run(
+                ['git', '-C', str(self.source), 'show',
+                 self._approved_context.runner_commit + ':docs/HERMES_SESSION_RECOVERY.md'],
+                check=True, capture_output=True, timeout=10).stdout:
+            raise ValueError('pinned recovery contract unavailable or changed')
+        identity = None
+        if re.fullmatch('[0-9a-f]{32}', path.name):
+            identity = {'task_issue': self.policy.issue,
+                        'authorization_identity': self.policy.identity,
+                        'runner_commit': self._approved_context.runner_commit,
+                        'base': self.policy.base, 'branch': self.policy.branch,
+                        'run_id': path.name, 'worktree': str(path)}
+            identity_path = Path(self.state) / 'recovery-identity.json'
+            fd = os.open(identity_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as output:
+                output.write(json.dumps(identity, sort_keys=True).encode())
+                output.flush()
+                os.fsync(output.fileno())
+            checkpoint(self.state, identity, 'child-intent', remaining='child preflight and task')
+        elif Path(self.source).resolve() == Path(__file__).resolve().parents[3]:
+            raise ValueError('production run identity must be 32 hex characters')
         prompt_path = Path(self.state) / 'prompt'
         fd = os.open(prompt_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         with os.fdopen(fd, 'w') as output:
-            output.write(trusted_context_prompt(self._approved_context, path) + '\n' + prompt)
+            recovery_command = ''
+            if identity is not None:
+                recovery_command = ('Checkpoint helper (run before and after each tests/commit/push effect, '
+                    'substituting pre-tests/post-tests/pre-commit/post-commit/pre-push/post-push '
+                    'for STAGE; --head may be added only after independently observing a commit):\n'
+                    f'PYTHONPATH={shlex.quote(str(Path(self.source) / "src"))} '
+                    f'{shlex.quote(self._approved_context.test_python)} -B -m '
+                    'signal_desk.task_bridge.recovery '
+                    f'--state {shlex.quote(str(self.state))} '
+                    f'--identity {shlex.quote(str(Path(self.state) / "recovery-identity.json"))} '
+                    '--stage STAGE\n')
+            output.write(trusted_context_prompt(self._approved_context, path) + '\n'
+                         + recovery_command
+                         + 'PINNED RECOVERY CONTRACT SHA-256: '
+                         + hashlib.sha256(recovery).hexdigest() + '\n'
+                         + 'Private checkpoint: ' + str(Path(self.state) / 'recovery-checkpoint.json')
+                         + '\nBefore/after tests, commit and push, record bounded intent/confirmed '
+                           'stage here atomically (0600, fsync file and parent); do not put secrets '
+                           'or raw logs there. Bridge alone publishes a draft. '
+                           'Read and follow the full pinned contract below BEFORE editing.\n'
+                         + recovery.decode('utf-8') + '\n' + prompt)
             output.flush()
             os.fsync(output.fileno())
         if self.stage_callback:
             self.stage_callback('child_invocation')
         self.execute(self.command(prompt_path, path))
+        if identity is not None:
+            checkpoint(self.state, identity, 'child-completed',
+                       remaining='verify local and remote branch; Bridge publishes PR')
         if self.stage_callback:
             self.stage_callback('child_completion', self.last_invocation)
             self.stage_callback('local_result_verification')
@@ -131,7 +185,22 @@ class HermesAgent:
         if (self.git_runner(['-C', str(path), 'rev-parse', 'HEAD^{tree}']) ==
                 self.git_runner(['-C', str(path), 'rev-parse', self.policy.base + '^{tree}'])):
             raise ValueError('child commit tree has no artifact changes from pinned start')
+        if identity is not None:
+            checkpoint(self.state, identity, 'pushed-head-verified', head=head,
+                       remaining='Bridge draft publication and exact-head CI', uncertainty='PR not yet published')
         return {'branch': self.policy.branch, 'head': head}
+
+    def recovery_checkpoint(self, stage, *, head=None, publication_receipt=None):
+        """Supervisor-only boundary; the Bridge journal remains authoritative."""
+        identity = json.loads((Path(self.state) / 'recovery-identity.json').read_bytes())
+        if (identity['authorization_identity'] != self.policy.identity or
+                identity['task_issue'] != self.policy.issue):
+            raise ValueError('recovery identity differs from Bridge authority')
+        return checkpoint(self.state, identity, stage, head=head,
+                          publication_receipt=publication_receipt,
+                          remaining='verify draft publication and exact-head CI',
+                          uncertainty='remote publication pending' if stage == 'pre-pr-publication'
+                          else 'reconcile remote PR/CI independently')
 
     @staticmethod
     def _installed_help():

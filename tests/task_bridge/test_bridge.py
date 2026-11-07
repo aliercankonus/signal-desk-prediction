@@ -107,6 +107,30 @@ class BridgeTests(unittest.TestCase):
     def bridge(self, policy=None):
         return Bridge(self.state, policy or self.policy, self.github, self.agent, auth_path=self.auth_path)
 
+    def test_recovery_checkpoint_fences_draft_post_and_readback(self):
+        self.github.pr = None
+        stages = []
+        self.agent.recovery_checkpoint = lambda stage, **kwargs: stages.append((stage, kwargs))
+        original = self.github.create_task_draft
+        def create(repo, branch, head):
+            self.assertEqual([entry[0] for entry in stages], ['pre-pr-publication'])
+            return original(repo, branch, head)
+        self.github.create_task_draft = create
+        result = self.bridge().once()
+        self.assertEqual(result['status'], 'review-ready')
+        self.assertEqual([entry[0] for entry in stages],
+                         ['pre-pr-publication', 'post-pr-publication'])
+        self.assertEqual(stages[-1][1]['publication_receipt'], result['pr_url'])
+
+    def test_recovery_checkpoint_failure_preserves_post_intent_without_post(self):
+        self.github.pr = None
+        def fail(stage, **kwargs):
+            raise RuntimeError('checkpoint fsync failed')
+        self.agent.recovery_checkpoint = fail
+        self.assertEqual(self.bridge().once()['status'], 'blocked')
+        self.assertEqual(self.github.create_calls, [])
+        self.assertEqual(self.bridge().reconcile()['status'], 'blocked')
+
     def test_preallocated_run_identity_is_journaled_and_conflicting_reentry_blocks(self):
         selected = 'c' * 32
         first = Bridge(self.state, self.policy, self.github, self.agent,
