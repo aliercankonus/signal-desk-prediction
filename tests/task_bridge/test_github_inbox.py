@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,8 @@ import time
 import unittest
 from types import SimpleNamespace
 
+WORKER = Path(__file__).resolve().parents[2] / 'autonomous-development'
+sys.path.insert(0, str(WORKER))
 from github_inbox import Inbox, GitHub, REPO, RateLimited, canonical, verify_grant, openssl_verify
 from signal_desk.task_bridge.adapters import HermesAgent
 from signal_desk.task_bridge.bridge import Policy
@@ -73,7 +76,7 @@ class TransportTests(unittest.TestCase):
 
 class InboxTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(dir='/opt/data/cache/scratch')
+        self.tmp = tempfile.TemporaryDirectory(dir=Path.home())
         self.addCleanup(self.tmp.cleanup)
         self.base = Path(self.tmp.name)
         self.root = self.base / 'github-inbox'
@@ -224,6 +227,8 @@ class InboxTests(unittest.TestCase):
             os.close(fd)
 
     def test_real_ed25519_verifier(self):
+        if shutil.which('openssl') is None:
+            self.skipTest('collector image lacks OpenSSL CLI; operator must preflight verifier')
         private = self.base / 'signer.pem'
         public = self.base / 'verifier.pem'
         payload = b'bounded grant'
@@ -242,7 +247,7 @@ class InboxTests(unittest.TestCase):
 
 class RecoveryDeliveryTests(unittest.TestCase):
     def test_private_checkpoint_intent_and_identity_fence(self):
-        with tempfile.TemporaryDirectory(dir='/opt/data/cache/scratch') as directory:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             state = Path(directory)
             state.chmod(0o700)
             identity = {'task_issue': 43, 'authorization_identity': 'a' * 64,
@@ -262,7 +267,7 @@ class RecoveryDeliveryTests(unittest.TestCase):
             self.assertEqual(json.loads((state / 'recovery-checkpoint.json').read_bytes()), second)
 
     def test_pinned_runbook_injected_before_child_effect(self):
-        with tempfile.TemporaryDirectory(dir='/opt/data/cache/scratch') as directory:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
             root = Path(directory)
             source = root / 'runner'
             source.mkdir()
