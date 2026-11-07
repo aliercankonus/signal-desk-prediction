@@ -1,0 +1,35 @@
+{
+  "candidate_files_sha256": {
+    "ops/bridge_one_shot/bridge_once_candidate.py": "ea20f3a6b76da624a7a04826e05e6c2cda1076420925e73903d3c707f2c78d57",
+    "ops/bridge_one_shot/compose.candidate.yml": "9a9d3253c2248311989201a014095be14e7fa2bca0450bc771a3e4d7f13910cf"
+  },
+  "candidate_runner": "e84021a786004456a12de9e25eae50d191da6cf1",
+  "candidate_task_branch": "docs/issue43-one-shot-review-note",
+  "candidate_task_start": "e84021a786004456a12de9e25eae50d191da6cf1",
+  "existing_host_runner": "00acd27132b68264ee2ab1692d3024f09c640c6d",
+  "frozen_source_sha256": {
+    "autonomous-development/bridge_queue.py": "f3a0c71ba8fd557ec7f78299b57bc44752d803a22b92c8f5cb242f5b85325677",
+    "autonomous-development/github_inbox.py": "8d2c488b12c2b194fda8aafbb8d1d81bbeb5f8ce2924184a05d3297f730a8f84",
+    "autonomous-development/queue_store.py": "c9f7889d66137234ffae67aa580561c4bebfe974465fbdfeecb07378cf771d1a",
+    "docs/HERMES_SESSION_RECOVERY.md": "91c4ca90594f23785dfabb5a0fb90df500fde24c56dbe54a8d6f77cc91f95ff9",
+    "ops/bridge_one_shot/bridge_once.py": "cbdf762e88f9c52875851b30100092fee4615e13d3d00833ab153aeb6317c197",
+    "ops/bridge_one_shot/canary_lifecycle.sh": "b182d76a8ba11ec9be497a271e316b5cd6908e222a338b914d65450553d9f419",
+    "ops/bridge_one_shot/compose.yml": "297c9f4b66e2807114848706b0806cdafbe553531f965fb6f33522eb433415e1",
+    "ops/bridge_one_shot/connect_proxy.py": "ccf1d660fba5a4758608b34611f395e5460e148c3e1f67edaa25529b5c78d619",
+    "ops/bridge_one_shot/host_canary.py": "5439d66bfec7132ee5ea49cf7bbf21242b8f706d60320d7b89e71f02797d78eb",
+    "ops/bridge_one_shot/network_acceptance.py": "184e4f44d2af2c3dfc4c436fa2241fdf516fccaeeeceff10fec7ea96750d6a3b",
+    "ops/bridge_one_shot/network_acceptance_host.sh": "6acabf86c36f7cf3ff2aaf518eb5b21dc67328363d00e9d60174dcc77e7daccc",
+    "ops/bridge_one_shot/network_preflight.py": "fb3520f6de9c66c6bbcb743fd600ba589d3b0126d7b10ba26ec93137cc393402",
+    "ops/bridge_one_shot/network_resources.py": "52b1c192ef6a366b0ec16e0ffa0c07697274d39b1a98e581cb796e99165f7b1d",
+    "ops/bridge_one_shot/worker_firewall.sh": "31f8e66e8559bd8b613d2089eff3f4a77c19cd5d41b858810869a813d454c165",
+    "ops/github_inbox/inboxctl.py": "c5a2410a48eb5ab9d7267f38d3d1cc131d547ba73e9d1d175faacc96bec9b612",
+    "src/signal_desk/task_bridge/adapters.py": "c8324044467e8aaae5fb65e34a590a978d35ecc892203b61777ee56dff6c5320",
+    "src/signal_desk/task_bridge/bridge.py": "00de33709e58210cb2532930df06e8fffa5fa56cb6b320a9a2bf6bc53379706c"
+  },
+  "repository": "aliercankonus/signal-desk-prediction",
+  "reviewed_main": "e84021a786004456a12de9e25eae50d191da6cf1",
+  "schema": 1,
+  "status": "review-only; not an activation or complete runtime closure",
+  "task_body_sha256": "c9e4e393ccc506954f0a18e6eaeea7c82ff598b0b41eac642d7f88da1fca73c6",
+  "task_issue": 43
+}

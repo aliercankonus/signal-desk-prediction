@@ -111,6 +111,13 @@ explicit approval for a main merge, obtain it for the concrete PR; never bypass 
 rejection by updating main through a ref mutation.
 
 
+## Autonomous development review boundary
+
+For the optional one-shot development task and interrupted-session handoff,
+read [the project-specific autonomous-development skill](skills/signal-desk-autonomous-development/SKILL.md)
+and the [dormant #41 review package](ops/bridge_one_shot/PACKAGE_REVIEW.md).
+These are repository-backed review references, not host or provider activation.
+
 ## Ordered capture and session replay
 
 Apply [the ordered replay contract](references/19-ordered-session-replay.md).
