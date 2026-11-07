@@ -540,6 +540,8 @@ class Bridge:
             if pr is None:
                 self._stage('pr_create_intent')
                 self._pr_intent(result['head'])  # Durable before the one permitted POST.
+                if hasattr(self.agent, 'recovery_checkpoint'):
+                    self.agent.recovery_checkpoint('pre-pr-publication', head=result['head'])
                 self._stage('authority_verification')
                 fresh = self.github.issue(p.repo, p.issue)
                 if (fresh.get('repo') != p.repo or fresh.get('number') != p.issue or
@@ -570,6 +572,9 @@ class Bridge:
                 raise AuthorityChangedError('task authority changed during draft publication')
             self._stage('pr_create_readback')
             self._pr_verified(pr, result['head'], reused=reused)
+            if hasattr(self.agent, 'recovery_checkpoint'):
+                self.agent.recovery_checkpoint('post-pr-publication', head=result['head'],
+                                               publication_receipt=pr['url'])
             self._update('running', result['head'], pr['url'], pr['ci'], pr['target_tip'])
             self._stage('status_publication')
             self._publish_status('review-ready', run_id, result['head'], pr['url'], pr['ci'], pr['target_tip'])
