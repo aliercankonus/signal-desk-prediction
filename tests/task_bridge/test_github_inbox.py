@@ -286,7 +286,8 @@ class RecoveryDeliveryTests(unittest.TestCase):
             state.mkdir(mode=0o700)
             worktree = state / 'worktrees' / ('d' * 32)
             policy = Policy(REPO, 43, 'c' * 64, base, 'test-review-note')
-            agent = HermesAgent(source, state, policy)
+            agent = HermesAgent(source, state, policy,
+                                help_runner=lambda: ' '.join(HermesAgent.FLAGS))
             agent._approved_context = ExecutionContext('/approved/bin/python', 'a' * 64,
                                                         base, '3.14.9', '8.3.3')
             agent.preflight = lambda: True
