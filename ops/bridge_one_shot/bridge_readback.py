@@ -6,6 +6,8 @@ own authenticated read-only GitHub GET client. Worker journal values are only
 claims; every publication, draft, branch and exact-head CI is independently
 observed. Never install or execute this module inside the worker container.
 """
+import base64
+import binascii
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +17,8 @@ import sqlite3
 REPO = 'aliercankonus/signal-desk-prediction'
 PIN = 'e84021a786004456a12de9e25eae50d191da6cf1'
 BRANCH = 'issue43-one-shot-review-note'
+CONTAINER_QUEUE = Path('/state/queue')
+ARTIFACT = 'docs/ONE_SHOT_REVIEW_NOTE.md'
 HEX32 = re.compile(r'[0-9a-f]{32}\Z')
 HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 HEX64 = re.compile(r'[0-9a-f]{64}\Z')
@@ -23,6 +27,37 @@ HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 def _expect(condition):
     if not condition:
         raise ValueError('independent readback mismatch')
+
+
+def _artifact_bytes(body):
+    """Derive approved bytes solely from the independently fetched frozen issue."""
+    marker = '```markdown\n'
+    _expect(isinstance(body, str) and body.count(marker) == 1 and
+            body.count('\n```\n') == 1 and
+            f'Create exactly one English Markdown documentation file, `{ARTIFACT}`' in body)
+    note = body.split(marker, 1)[1].split('\n```\n', 1)[0].encode('utf-8') + b'\n'
+    _expect(0 < len(note) <= 8192)
+    return note
+
+
+def _check_artifact(compare, head, body, get, base_path):
+    expected = _artifact_bytes(body)
+    files = compare.get('files')
+    _expect(isinstance(files, list) and len(files) == 1)
+    entry = files[0]
+    _expect(entry.get('filename') == ARTIFACT and entry.get('status') == 'added' and
+            isinstance(entry.get('sha'), str) and HEX40.fullmatch(entry['sha']))
+    record = get(base_path + '/contents/' + ARTIFACT + '?ref=' + head)
+    _expect(record.get('type') == 'file' and record.get('path') == ARTIFACT and
+            record.get('encoding') == 'base64' and record.get('sha') == entry['sha'] and
+            record.get('size') == len(expected) and isinstance(record.get('content'), str) and
+            len(record['content']) <= 16384)
+    try:
+        actual = base64.b64decode(''.join(record['content'].split()), validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError('invalid artifact encoding') from None
+    _expect(actual == expected and
+            hashlib.sha1(b'blob ' + str(len(actual)).encode() + b'\0' + actual).hexdigest() == entry['sha'])
 
 
 def _verified(queue, queue_id, digest, identity, get):
@@ -38,8 +73,11 @@ def _verified(queue, queue_id, digest, identity, get):
     run, repo, issue, status, base, body_digest, branch, worktree, head, url, ci, tip, auth = rows[0]
     _expect(HEX32.fullmatch(run) and (repo, issue, status, base, body_digest, branch, auth) ==
             (REPO, 43, 'review-ready', PIN, digest, BRANCH, identity))
-    _expect(worktree == str(Path(queue) / queue_id / 'bridge' / 'worktrees' / run))
-    _expect(isinstance(head, str) and HEX40.fullmatch(head) and isinstance(tip, str) and HEX40.fullmatch(tip))
+    # The DB is opened through the host bind source; Bridge recorded the path
+    # in its container namespace, not this root process's host namespace.
+    _expect(worktree == str(CONTAINER_QUEUE / queue_id / 'bridge' / 'worktrees' / run))
+    _expect(isinstance(head, str) and HEX40.fullmatch(head) and isinstance(tip, str) and HEX40.fullmatch(tip) and
+            ci in ('success', 'failure', 'pending', 'unknown'))
     number = creations[0][3]
     _expect(type(number) is int and number > 0 and creations[0] ==
             (1, 'verified', head, number, f'https://github.com/{REPO}/pull/{number}') and url == creations[0][4])
@@ -76,9 +114,11 @@ def _verified(queue, queue_id, digest, identity, get):
     branch_ref = get(base_path + '/git/ref/heads/' + BRANCH)
     target_ref = get(base_path + '/git/ref/heads/main')
     _expect(branch_ref.get('ref') == 'refs/heads/' + BRANCH and
-            branch_ref.get('object') == {'type': 'commit', 'sha': head} and
+            branch_ref.get('object', {}).get('type') == 'commit' and
+            branch_ref['object'].get('sha') == head and
             target_ref.get('ref') == 'refs/heads/main' and
-            target_ref.get('object') == {'type': 'commit', 'sha': tip})
+            target_ref.get('object', {}).get('type') == 'commit' and
+            target_ref['object'].get('sha') == tip)
     candidates = get(base_path + '/pulls?state=open&head=aliercankonus%3A' + BRANCH + '&per_page=2')
     _expect(isinstance(candidates, list) and len(candidates) == 1)
     pr = candidates[0]
@@ -91,6 +131,7 @@ def _verified(queue, queue_id, digest, identity, get):
             pr.get('base', {}).get('ref') == 'main' and pr['base'].get('repo', {}).get('full_name') == REPO)
     compare = get(base_path + '/compare/' + PIN + '...' + head)
     _expect(compare.get('status') in ('ahead', 'identical') and compare.get('merge_base_commit', {}).get('sha') == PIN)
+    _check_artifact(compare, head, task['body'], get, base_path)
     checks = get(base_path + '/commits/' + head + '/check-runs?per_page=100')
     workflows = get(base_path + '/actions/runs?head_sha=' + head + '&per_page=100')
     legacy = get(base_path + '/commits/' + head + '/status')
@@ -105,7 +146,8 @@ def _verified(queue, queue_id, digest, identity, get):
     observed = ('unknown' if not states else
                 'failure' if any(s in ('failure', 'timed_out', 'cancelled', 'action_required') for s in states) else
                 'success' if all(s == 'success' for s in states) else 'pending')
-    _expect(observed == ci)
+    # Journal/issue receipt is a historical snapshot; this is the current
+    # independently fetched exact-head CI state, which may have progressed.
     return {'verified': True, 'run_id': run, 'head': head, 'pr_url': url, 'observed_ci': observed}
 
 

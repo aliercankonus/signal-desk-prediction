@@ -180,6 +180,25 @@ def test_drip_fed_http_response_is_cut_off_by_whole_request_deadline(monkeypatch
         client.task(43)
 
 
+def test_root_readback_accepts_only_frozen_artifact_contents_get(monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def read(self, limit): return b'{}'
+    class Opener:
+        def open(self, request, timeout):
+            assert request.get_method() == 'GET'
+            return Response()
+    monkeypatch.setattr(signer.urllib.request, 'build_opener', lambda *_: Opener())
+    client = signer.GitHub.__new__(signer.GitHub)
+    client._token = 'synthetic-offline-token'
+    client.deadline = time.monotonic() + 2
+    path = f'/repos/{signer.REPO}/contents/docs/ONE_SHOT_REVIEW_NOTE.md?ref={RUNNER}'
+    assert client.get(path) == {}
+    with pytest.raises(ValueError, match='outside fixed scope'):
+        client.get(path.replace('ONE_SHOT_REVIEW_NOTE', 'OTHER'))
+
+
 def test_slow_multipage_scan_stops_at_shared_deadline(private_root, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
