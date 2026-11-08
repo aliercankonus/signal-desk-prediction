@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # HOST-ONLY. Never run from the Hermes container. No global flush or service restart.
 set -euo pipefail
+PATH=/usr/sbin:/sbin:/usr/bin:/bin
+export PATH
 
 ACTION="${1:-}"
 [[ "$ACTION" == status || "$ACTION" == apply || "$ACTION" == rollback ]] || { echo 'usage: worker_firewall.sh status|apply|rollback' >&2; exit 2; }
+for tool in iptables ip docker python3 wc; do
+  command -v "$tool" >/dev/null || { echo "NO-GO: required host tool unavailable: $tool" >&2; exit 2; }
+done
 ipt() { iptables -w 5 "$@"; }
 
 network_gate() {

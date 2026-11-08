@@ -124,6 +124,21 @@ def test_post_intent_error_preserves_claim_and_refuses_cleanup_or_report(stage):
         assert "private diagnostic" not in journal.file.read_text()
 
 
+def test_interrupt_during_claim_preserves_intent_without_replay_or_cleanup():
+    with _attempt() as root:
+        journal = module.Journal(Path(root) / 'attempt1', 'attempt1')
+        ops = FakeOps()
+        def interrupt():
+            ops.calls.append('one_bridge_claim')
+            raise KeyboardInterrupt()
+        ops.one_bridge_claim = interrupt
+        state = module.run_once(journal, ops, deadline=100, clock=lambda: 0)
+        assert state['unresolved_effect'] == 'one_bridge_claim'
+        assert state['cleanup_verified'] is False
+        assert 'cleanup' not in ops.calls and 'report' not in ops.calls
+        assert json.loads(journal.file.read_text()) == state
+
+
 def test_incomplete_exact_id_cleanup_cannot_publish_success():
     with _attempt() as root:
         journal = module.Journal(Path(root) / "attempt1", "attempt1")

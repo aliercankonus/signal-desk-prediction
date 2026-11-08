@@ -13,9 +13,11 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -93,20 +95,35 @@ def load_scope(path):
 class RateLimited(Exception):
     pass
 
+def remaining(deadline, cap):
+    if deadline is None:
+        return cap
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise TimeoutError('signer overall deadline')
+    return min(cap, seconds)
+
 
 class GitHub:
     """Bounded exact GET and issue-comment POST with a separate root-only token."""
-    def __init__(self, token_path):
+    def __init__(self, token_path, *, deadline=None):
         token = private_bytes(token_path)
         if not token or len(token) > 1024 or b'\n' in token or b'\r' in token:
             raise ValueError('signer token malformed')
         self._token = token.decode('ascii')
+        self.deadline = deadline
 
     def _request(self, method, path, body=None):
         prefix = f'/repos/{REPO}/'
-        if not path.startswith(prefix) or not re.fullmatch(
+        readback = re.fullmatch(
+            r'(?:git/ref/heads/(?:main|issue43-one-shot-review-note)|pulls\?state=open&head=aliercankonus%3Aissue43-one-shot-review-note&per_page=2|compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|commits/[0-9a-f]{40}/(?:check-runs\?per_page=100|status)|actions/runs\?head_sha=[0-9a-f]{40}&per_page=100|issues/43/comments\?per_page=100&page=[1-5])',
+            path[len(prefix):]) if path.startswith(prefix) else None
+        regular = path.startswith(prefix) and re.fullmatch(
                 r'(?:issues/43|issues/comments/[1-9][0-9]*|issues/(?:41|45)/comments(?:\?[^?]*)?)',
-                path[len(prefix):]) or (method == 'POST' and
+                path[len(prefix):])
+        if not ((method == 'GET' and path == '/user') or
+                (method == 'GET' and (regular or readback)) or
+                (method == 'POST' and regular)) or (method == 'POST' and
                 not re.fullmatch(r'issues/(?:41|45)/comments', path[len(prefix):])) or method not in ('GET', 'POST'):
             raise ValueError('signer request outside fixed scope')
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -117,21 +134,40 @@ class GitHub:
             headers={'Authorization': 'Bearer ' + self._token,
                      'Accept': 'application/vnd.github+json',
                      'Content-Type': 'application/json', 'User-Agent': 'signal-desk-root-signer'})
+        # Socket timeouts are inactivity bounds, not whole-response bounds: a
+        # drip-fed response could otherwise keep a signer request alive forever.
+        limit = remaining(self.deadline, 12)
+        old_handler = signal.getsignal(signal.SIGALRM)
+        old_timer = signal.getitimer(signal.ITIMER_REAL)
+        if old_timer[0]:
+            raise RuntimeError('pre-existing alarm cannot be replaced safely')
+        def alarm(_signal, _frame):
+            raise TimeoutError('signer request deadline')
+        signal.signal(signal.SIGALRM, alarm)
+        signal.setitimer(signal.ITIMER_REAL, limit)
         try:
-            with urllib.request.build_opener(NoRedirect).open(req, timeout=12) as response:
-                raw = response.read(65537)
-                if len(raw) > 65536:
-                    raise ValueError('signer response too large')
-                return json.loads(raw)
-        except urllib.error.HTTPError as exc:
-            if exc.code in (403, 429):
-                raise RateLimited() from None
-            raise RuntimeError('signer GitHub request failed') from None
+            try:
+                with urllib.request.build_opener(NoRedirect).open(req, timeout=limit) as response:
+                    raw = response.read(65537)
+                    if len(raw) > 65536:
+                        raise ValueError('signer response too large')
+                    remaining(self.deadline, 12)
+                    return json.loads(raw)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (403, 429):
+                    raise RateLimited() from None
+                raise RuntimeError('signer GitHub request failed') from None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_handler)
 
     def task(self, issue):
         if issue != 43:
             raise ValueError('wrong task')
         return self._request('GET', f'/repos/{REPO}/issues/43')
+
+    def get(self, path):
+        return self._request('GET', path)
 
     def comment(self, issue, comment_id):
         if issue not in ISSUES or type(comment_id) is not int or comment_id < 1:
@@ -146,12 +182,13 @@ class GitHub:
             raise ValueError('grant response invalid')
         return result['id']
 
-    def candidates(self, issue, start):
+    def candidates(self, issue, start, *, deadline=None):
         if issue not in ISSUES or not UTC.fullmatch(start):
             raise ValueError('signer feed outside scope')
         # The root signer has no unbounded historical scan or webhook trust.
         from urllib.parse import urlencode
         for page in range(1, 6):
+            remaining(deadline if deadline is not None else self.deadline, 12)
             query = urlencode({'per_page': 100, 'page': page, 'since': start})
             rows = self._request('GET', f'/repos/{REPO}/issues/{issue}/comments?{query}')
             if not isinstance(rows, list) or len(rows) > 100:
@@ -217,25 +254,29 @@ class Claim:
                 os.close(parent)
 
 
-def sign_once(scope, state_root, client, issue, comment_id, sign, *, verify=None):
+def sign_once(scope, state_root, client, issue, comment_id, sign, *, verify=None, deadline=None):
     """Exact GET fences -> claim -> sign -> POST intent -> one POST -> GET receipt."""
     if issue not in ISSUES or type(comment_id) is not int or comment_id <= scope.cursors[str(issue)]:
         raise ValueError('instruction before enrollment cursor')
     claim = Claim(state_root, comment_id)
     if claim.directory.exists() or claim.directory.is_symlink():
         raise FileExistsError('instruction already claimed; reconcile read-only')
+    remaining(deadline, 12)
     task = client.task(scope.task_issue)
     if (not isinstance(task, dict) or task.get('number') != scope.task_issue or
             task.get('state') != 'open' or not isinstance(task.get('body'), str) or
             hashlib.sha256(task['body'].encode('utf-8')).hexdigest() != scope.body_digest):
         raise ValueError('frozen task changed')
+    remaining(deadline, 12)
     first = client.comment(issue, comment_id)
     digest = instruction(scope, issue, comment_id, first)
     claim.save({'phase': 'claimed', 'issue': issue, 'instruction_id': comment_id,
                 'instruction_sha256': digest}, first=True)
+    remaining(deadline, 12)
     fresh = client.comment(issue, comment_id)
     if fresh != first or instruction(scope, issue, comment_id, fresh) != digest:
         raise ValueError('instruction changed after claim')
+    remaining(deadline, 12)
     again = client.task(scope.task_issue)
     if again != task:
         raise ValueError('task changed before signature')
@@ -243,15 +284,21 @@ def sign_once(scope, state_root, client, issue, comment_id, sign, *, verify=None
                'instruction_sha256': digest, 'task_issue': scope.task_issue,
                'authority_identity': scope.authority_identity,
                'runner_commit': scope.runner_commit, 'scope': 'development-only'}
-    signature = sign(canonical(payload))
-    if not isinstance(signature, bytes) or len(signature) != 64 or verify is None or not verify(canonical(payload), signature):
+    remaining(deadline, 10)
+    signature = sign(canonical(payload)) if deadline is None else sign(canonical(payload), deadline=deadline)
+    remaining(deadline, 10)
+    valid = (verify(canonical(payload), signature) if deadline is None else
+             verify(canonical(payload), signature, deadline=deadline)) if verify is not None else False
+    if not isinstance(signature, bytes) or len(signature) != 64 or verify is None or not valid:
         raise ValueError('signer/public verifier mismatch')
     envelope = {'signal_desk_grant_v1': {'payload': payload,
                 'signature': base64.b64encode(signature).decode('ascii')}}
     text = canonical(envelope).decode('ascii')
     claim.save({'phase': 'post-intent', 'issue': issue, 'instruction_id': comment_id,
                 'instruction_sha256': digest, 'grant_sha256': hashlib.sha256(text.encode()).hexdigest()})
+    remaining(deadline, 12)
     grant_id = client.publish(issue, text)
+    remaining(deadline, 12)
     receipt = client.comment(issue, grant_id)
     if (not isinstance(receipt, dict) or receipt.get('id') != grant_id or grant_id <= comment_id or
             receipt.get('issue_url') != f'https://api.github.com/repos/{REPO}/issues/{issue}' or
@@ -264,20 +311,23 @@ def sign_once(scope, state_root, client, issue, comment_id, sign, *, verify=None
     return {'status': 'verified', 'grant_id': grant_id}
 
 
-def sign_scan(scope, state_root, client, sign, *, verify):
+def sign_scan(scope, state_root, client, sign, *, verify, deadline=None):
     """One bounded scan; no polling, no model and no signature for empty feeds."""
     for issue in ISSUES:
-        for row in client.candidates(issue, scope.start):
+        remaining(deadline, 12)
+        rows = client.candidates(issue, scope.start) if deadline is None else client.candidates(issue, scope.start, deadline=deadline)
+        for row in rows:
+            remaining(deadline, 12)
             comment_id = row.get('id') if isinstance(row, dict) else None
             if type(comment_id) is not int or comment_id <= scope.cursors[str(issue)]:
                 continue
             if row.get('body') != f'RUN FROZEN DEVELOPMENT TASK #43 AUTH {scope.authority_identity}':
                 continue
-            return sign_once(scope, state_root, client, issue, comment_id, sign, verify=verify)
+            return sign_once(scope, state_root, client, issue, comment_id, sign, verify=verify, deadline=deadline)
     return None
 
 
-def openssl_sign(key_path, payload):
+def openssl_sign(key_path, payload, *, deadline=None):
     """Sign only after private key preflight; no shell and no key in argv/stdout."""
     private_bytes(key_path, 8192)
     with tempfile.TemporaryDirectory(dir=Path(key_path).parent) as directory:
@@ -285,13 +335,13 @@ def openssl_sign(key_path, payload):
         message.write_bytes(payload)
         result = subprocess.run(['openssl', 'pkeyutl', '-sign', '-inkey', str(key_path),
                                  '-rawin', '-in', str(message)], capture_output=True,
-                                timeout=10, check=True)
+                                timeout=remaining(deadline, 10), check=True)
         if len(result.stdout) != 64:
             raise ValueError('invalid Ed25519 signature')
         return result.stdout
 
 
-def openssl_verify(public_path, payload, signature):
+def openssl_verify(public_path, payload, signature, *, deadline=None):
     public = private_bytes(public_path, 8192)
     with tempfile.TemporaryDirectory(dir=Path(public_path).parent) as directory:
         key = Path(directory) / 'public.pem'; key.write_bytes(public)
@@ -299,4 +349,4 @@ def openssl_verify(public_path, payload, signature):
         sig = Path(directory) / 'signature'; sig.write_bytes(signature)
         return subprocess.run(['openssl', 'pkeyutl', '-verify', '-pubin', '-inkey',
                                str(key), '-rawin', '-in', str(msg), '-sigfile', str(sig)],
-                              capture_output=True, timeout=10).returncode == 0
+                              capture_output=True, timeout=remaining(deadline, 10)).returncode == 0

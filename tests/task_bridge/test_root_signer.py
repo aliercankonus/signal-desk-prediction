@@ -3,7 +3,9 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
+import time
 
 import pytest
 
@@ -159,3 +161,40 @@ def test_cursor_and_task_identity_replay_rejected(private_root):
     with pytest.raises(ValueError):
         signer.sign_once(scope(), private_root, client, 45, 101, lambda _: b'x' * 64)
     assert client.post_count == 0
+
+
+def test_drip_fed_http_response_is_cut_off_by_whole_request_deadline(monkeypatch):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def read(self, limit):
+            time.sleep(0.2)  # Simulates a socket drip-feed, no network.
+            return b'{}'
+    class Opener:
+        def open(self, request, timeout): return Response()
+    monkeypatch.setattr(signer.urllib.request, 'build_opener', lambda *_: Opener())
+    client = signer.GitHub.__new__(signer.GitHub)
+    client._token = 'synthetic-offline-token'
+    client.deadline = time.monotonic() + 0.04
+    with pytest.raises(TimeoutError, match='deadline'):
+        client.task(43)
+
+
+def test_slow_multipage_scan_stops_at_shared_deadline(private_root, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+
+    class SlowPages(FakeGitHub):
+        def candidates(self, issue, start, *, deadline=None):
+            assert deadline == 103.0
+            for page in range(5):
+                self.events.append((issue, page))
+                clock[0] += 0.8
+                yield {'id': 102 + page, 'body': 'not an instruction'}
+
+    client = SlowPages()
+    with pytest.raises(TimeoutError, match='deadline'):
+        signer.sign_scan(scope(), private_root, client, lambda _: (_ for _ in ()).throw(
+            AssertionError('signed')), verify=lambda *_: True, deadline=103.0)
+    assert client.events == [(41, 0), (41, 1), (41, 2), (41, 3)]
+    assert not list(private_root.iterdir())

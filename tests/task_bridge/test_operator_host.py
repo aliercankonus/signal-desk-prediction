@@ -86,27 +86,31 @@ def test_tick_budget_reserves_reconcile_cleanup_and_report(monkeypatch):
         assert host.CLEANUP_RESERVE >= 400
 
 
-def test_host_reconcile_requires_independent_worker_bridge_remote_predicate():
-    ops = host.HostOperations(plan(), runner=FakeRunner())
-    queue_id = 'b' * 32
-    claim = {'status': 'review-ready', 'grant_id': 123, 'queue_id': queue_id,
+def test_host_reconcile_ignores_forged_worker_verifier(tmp_path, monkeypatch):
+    import dataclasses
+    from types import SimpleNamespace
+    import root_signer
+    from test_bridge_readback import fixture, QUEUE, DIGEST, HEAD, BRANCH
+    queue, _, api = fixture(tmp_path)
+    cfg = dataclasses.replace(plan(), state=queue.parent,
+                              bundle=ROOT / 'ops/bridge_one_shot')
+    monkeypatch.setattr(root_signer, 'load_scope', lambda _: SimpleNamespace(
+        body_digest=DIGEST, authority_identity='e' * 64))
+    ops = host.HostOperations(cfg, runner=FakeRunner(),
+                              github=SimpleNamespace(get=lambda path: api[path]))
+    claim = {'status': 'review-ready', 'grant_id': 123, 'queue_id': QUEUE,
              'publication_intent': None}
     ops.claim_status = {'status': 'review-ready', 'claim': dict(claim)}
     ops._inbox = lambda action: {'claim': claim}
-    reads = []
-    def worker(*argv, **kwargs):
-        reads.append(argv)
-        return json.dumps({'verified': False, 'head': 'a' * 40,
-                           'pr_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/1',
-                           'observed_ci': None, 'run_id': 'c' * 32})
-    ops._worker = worker
-    assert ops.reconcile() == 'blocked'
-    assert len(reads) == 1 and '--queue-id' in reads[0] and queue_id in reads[0]
-    ops._worker = lambda *argv, **kwargs: json.dumps({'verified': True, 'head': 'a' * 40,
-        'pr_url': 'https://github.com/aliercankonus/signal-desk-prediction/pull/1',
-        'observed_ci': 'pending', 'run_id': 'c' * 32})
+    ops._worker = lambda *a, **k: (_ for _ in ()).throw(AssertionError('worker code must not be run'))
     assert ops.reconcile() == 'review-ready'
     assert ops.remote_result['observed_ci'] == 'pending'
+    # A malicious worker can replace its verifier/output; the root predicate
+    # observes the remote branch independently and refuses counterfeit success.
+    api[f'/repos/aliercankonus/signal-desk-prediction/git/ref/heads/{BRANCH}']['object']['sha'] = '9' * 40
+    ops.remote_result = None
+    assert ops.reconcile() == 'blocked'
+    assert ops.remote_result is None
 
 
 def test_oversized_merged_git_blob_is_refused_before_capture():
@@ -317,4 +321,27 @@ def test_bounded_command_clamps_to_overall_budget_and_suppresses_output(monkeypa
     assert shell(['docker', 'ps'], timeout=300) == 'safe'
     assert len(calls) == 1 and 0 < calls[0][1]['timeout'] <= 2
     assert calls[0][1]['capture_output'] is True and calls[0][1]['check'] is True
-    assert calls[0][1]['env']['PATH'] == '/usr/bin:/bin'
+    assert calls[0][1]['env']['PATH'] == '/usr/sbin:/sbin:/usr/bin:/bin'
+
+
+def test_command_runner_sanitizes_inherited_and_supplied_path(monkeypatch):
+    monkeypatch.setenv('PATH', '/untrusted/parent')
+    calls = []
+    def fake_run(argv, **kwargs):
+        calls.append(kwargs['env'])
+        class Result: stdout = b''; stderr = b''
+        return Result()
+    monkeypatch.setattr(host.subprocess, 'run', fake_run)
+    host.CommandRunner(deadline=host.time.monotonic() + 10)(
+        ['iptables', '-S'], timeout=5, env={'PATH': '/untrusted/caller'})
+    assert calls[0]['PATH'] == '/usr/sbin:/sbin:/usr/bin:/bin'
+
+
+def test_preflight_rejects_missing_admin_tool_before_any_command(monkeypatch):
+    import shutil
+    monkeypatch.setattr(host.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(shutil, 'which', lambda name, path=None: None if name == 'iptables' else '/usr/bin/' + name)
+    runner = FakeRunner()
+    with pytest.raises(FileNotFoundError, match='iptables'):
+        host.HostOperations(plan(), runner=runner).preflight()
+    assert runner.calls == []

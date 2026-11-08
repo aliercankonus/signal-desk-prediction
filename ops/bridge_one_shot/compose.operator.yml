@@ -75,11 +75,7 @@ services:
         target: /opt/worker-probe.py
         read_only: true
         bind: {create_host_path: false}
-      - type: bind
-        source: ${BRIDGE_REVIEW_HOST:?merged helper bundle required}/bridge_readback.py
-        target: /opt/bridge-readback.py
-        read_only: true
-        bind: {create_host_path: false}
+
   connect-proxy:
     <<: *base
     profiles: [execution]

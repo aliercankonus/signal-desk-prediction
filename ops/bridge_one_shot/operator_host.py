@@ -9,11 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import select
+import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -43,6 +46,14 @@ ATTEMPT = re.compile(r'[a-z][a-z0-9-]{5,63}\Z')
 SIGNER_STATE_ROOT = Path('/var/lib/signal-desk/issue41-signer-claims')
 CLEANUP_RESERVE = 420  # Worst-case bounded remote readback, ID cleanup and reporting.
 SCAN_RESERVE = 120  # A bounded signer scan can consume several HTTP timeouts.
+HOST_PATH = '/usr/sbin:/sbin:/usr/bin:/bin'
+
+
+def require_host_tools():
+    """Fail before any isolation effect if a required host executable is absent."""
+    for tool in ('iptables', 'ip', 'docker', 'git', 'python3', 'bash', 'wc'):
+        if shutil.which(tool, path=HOST_PATH) is None:
+            raise FileNotFoundError(f'required host tool unavailable: {tool}')
 
 
 @dataclass(frozen=True)
@@ -167,10 +178,11 @@ class CommandRunner:
             raise TimeoutError('operator overall deadline')
         if not argv or any(not isinstance(arg, str) for arg in argv):
             raise ValueError('command argv invalid')
-        safe_env = {'PATH': '/usr/bin:/bin', 'HOME': '/root', 'LC_ALL': 'C',
+        safe_env = {'PATH': HOST_PATH, 'HOME': '/root', 'LC_ALL': 'C',
                     'GIT_CONFIG_NOSYSTEM': '1', 'GIT_TERMINAL_PROMPT': '0'}
         if env:
             safe_env.update(env)
+        safe_env['PATH'] = HOST_PATH  # Caller fields may not redirect root executable lookup.
         completed = subprocess.run(argv, input=input, capture_output=True, check=True,
                                    timeout=min(float(timeout), remaining), env=safe_env)
         if len(completed.stdout) > 65536 or len(completed.stderr) > 65536:
@@ -195,6 +207,7 @@ class HostOperations:
         self.claim_status = None
         self.report_text = None
         self.remote_result = None
+        self.runtime_stopped = False  # True only after exact worker stop/readback.
 
     def _call(self, argv, timeout=20, *, env=None, input=None):
         remaining = self.deadline - time.monotonic()
@@ -272,6 +285,7 @@ class HostOperations:
         p = self.plan
         if os.geteuid() != 0:
             raise PermissionError('root operator required')
+        require_host_tools()
         for path in (p.bundle, p.source, p.journal_parent, p.signer_state_root,
                      p.signer_token.parent, p.signer_key.parent, p.signer_policy.parent):
             trusted(path)
@@ -311,7 +325,7 @@ class HostOperations:
         for name in sorted(ARTIFACTS):
             blob = self.merged_blob(name)
             local = p.bundle / Path(name).name
-            mode = 0o444 if local.name in {'worker_probe.py', 'bridge_readback.py', 'connect_proxy.py'} else 0o600
+            mode = 0o444 if local.name in {'worker_probe.py', 'connect_proxy.py'} else 0o600
             if (local.is_symlink() or not local.is_file() or local.stat().st_uid != 0 or
                     stat.S_IMODE(local.stat().st_mode) != mode or local.stat().st_size > 65536 or
                     hashlib.sha256(local.read_bytes()).digest() != hashlib.sha256(blob.encode()).digest() or
@@ -391,11 +405,31 @@ class HostOperations:
         if result != {'authenticated': True, 'task_open': True, 'git_read': True}:
             raise ValueError('worker authenticated read-only checks failed')
 
+    def _stop_claim_runtime(self):
+        """Terminate the exact container, not merely its Docker client.
+
+        The claim/worktree/journals survive. Failure or uncertain inspect is
+        never represented as a stopped runtime; no second dispatch is allowed.
+        """
+        ident = self.worker_id
+        self._container(ident, 'inbox-worker')
+        self._docker('stop', '--time', '5', ident, timeout=20)
+        self._container(ident, 'inbox-worker', running=False)
+        self.runtime_stopped = True
+
     def _inbox(self, action, *extra, timeout=30):
-        result = self._worker('/opt/hermes/.venv/bin/python', '-I', '-B',
-            '/workspace/runner/ops/github_inbox/inboxctl.py', action,
-            '--enrollment', '/private/inbox/enrollment.json',
-            '--state', '/state/github-inbox', *extra, timeout=timeout)
+        try:
+            result = self._worker('/opt/hermes/.venv/bin/python', '-I', '-B',
+                '/workspace/runner/ops/github_inbox/inboxctl.py', action,
+                '--enrollment', '/private/inbox/enrollment.json',
+                '--state', '/state/github-inbox', *extra, timeout=timeout)
+        except BaseException:
+            if action == 'tick':
+                try:
+                    self._stop_claim_runtime()
+                except BaseException:
+                    self.runtime_stopped = False
+            raise
         value = json.loads(result)
         if not isinstance(value, dict):
             raise ValueError('inbox result invalid')
@@ -429,12 +463,14 @@ class HostOperations:
         check_signer_binding(self.plan, scope)
         if str((self.plan.state / 'github-inbox').lstat().st_ino) != self.enrollment_inode:
             raise ValueError('enrollment root changed')
-        client = self.signer or GitHub(self.plan.signer_token)
+        client = self.signer or GitHub(self.plan.signer_token, deadline=self.deadline - CLEANUP_RESERVE)
         # A new manager instruction may arrive during this bounded operator entry.
         while time.monotonic() < self.deadline - CLEANUP_RESERVE - SCAN_RESERVE:
+            scan_deadline = self.deadline - CLEANUP_RESERVE - SCAN_RESERVE
             grant = sign_scan(scope, self.plan.signer_state_root, client,
-                lambda payload: openssl_sign(self.plan.signer_key, payload),
-                verify=lambda payload, sig: openssl_verify(self.plan.signer_public, payload, sig))
+                lambda payload, *, deadline: openssl_sign(self.plan.signer_key, payload, deadline=deadline),
+                verify=lambda payload, sig, *, deadline: openssl_verify(
+                    self.plan.signer_public, payload, sig, deadline=deadline), deadline=scan_deadline)
             if grant is not None:
                 available = self.deadline - time.monotonic() - CLEANUP_RESERVE
                 if available <= 0:
@@ -463,8 +499,19 @@ class HostOperations:
                 not isinstance(claim.get('queue_id'), str) or
                 not re.fullmatch(r'[0-9a-f]{32}', claim['queue_id'])):
             return 'unknown'
-        remote = json.loads(self._worker('/opt/hermes/.venv/bin/python', '-I', '-B',
-            '/opt/bridge-readback.py', '--queue-id', claim['queue_id'], timeout=60))
+        # Execute hash-checked root-only bytes, never a worker's code or JSON.
+        # The root credential independently GETs every issue/PR/head/CI receipt.
+        from root_signer import GitHub, load_scope
+        scope = load_scope(self.plan.signer_policy)
+        spec = importlib.util.spec_from_file_location(
+            '_protected_bridge_readback', self.plan.bundle / 'bridge_readback.py')
+        if spec is None or spec.loader is None:
+            raise ValueError('protected verifier unavailable')
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        client = self.github or GitHub(self.plan.signer_token, deadline=self.deadline)
+        remote = verifier.verify(self.plan.state / 'queue', claim['queue_id'],
+                                 scope.body_digest, scope.authority_identity, client.get)
         if not isinstance(remote, dict) or remote.get('verified') is not True:
             return 'blocked'
         if (not isinstance(remote.get('run_id'), str) or
@@ -548,7 +595,7 @@ class HostOperations:
         from root_signer import GitHub, canonical
         if sanitized.get('cleanup_verified') is not True:
             raise ValueError('cannot report before cleanup')
-        client = self.github or GitHub(self.plan.signer_token)
+        client = self.github or GitHub(self.plan.signer_token, deadline=self.deadline)
         self.report_text = canonical({'operator_attempt': self.plan.attempt,
             'result': sanitized['result'], 'cleanup_verified': True,
             'failure': sanitized['failure'], 'task': 43,
@@ -558,7 +605,7 @@ class HostOperations:
 
     def report_readback(self, receipt, sanitized):
         from root_signer import GitHub
-        client = self.github or GitHub(self.plan.signer_token)
+        client = self.github or GitHub(self.plan.signer_token, deadline=self.deadline)
         row = client.comment(41, int(receipt))
         return (row.get('id') == int(receipt) and row.get('issue_url') ==
                 f'https://api.github.com/repos/{REPO}/issues/41' and
@@ -583,8 +630,15 @@ def main():
     plan = load_plan(args.plan)
     deadline = time.monotonic() + plan.overall_seconds
     journal = Journal(plan.journal_parent / plan.attempt, plan.attempt)
-    outcome = run_once(journal, HostOperations(plan, runner=CommandRunner(deadline=deadline),
-                                                deadline=deadline), deadline=deadline)
+    old_term = signal.getsignal(signal.SIGTERM)
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt('operator interrupted')
+    signal.signal(signal.SIGTERM, interrupt)
+    try:
+        outcome = run_once(journal, HostOperations(plan, runner=CommandRunner(deadline=deadline),
+                                                    deadline=deadline), deadline=deadline)
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
     print(json.dumps({k: outcome[k] for k in ('status', 'phase', 'unresolved_effect',
                                               'cleanup_verified', 'report_receipt')}, sort_keys=True))
     return 0 if outcome['status'] == 'review-ready' and outcome['cleanup_verified'] else 2

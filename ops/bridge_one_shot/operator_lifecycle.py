@@ -167,7 +167,7 @@ def run_once(journal: Journal, ops: Operations, *, deadline: float,
             journal.record(phase, intent=None, status="pending", owned=owned)
             if phase == "preflight":
                 preflight_done = True
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         failure = type(exc).__name__
         # If an effect fails after intent, identities may be unknown: no guessed cleanup.
         pending = journal.state["intent"]
