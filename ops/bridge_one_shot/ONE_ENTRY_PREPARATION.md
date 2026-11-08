@@ -1,6 +1,6 @@
-# #41 one-entry lifecycle: reviewed core, **NO-GO** for a host run
+# #41 one-entry lifecycle: dormant host adapter, **NO-GO** for a host run
 
-`operator_lifecycle.py --review` is a **read-only repository check**, not a root entry to run #43. It verifies the pinned source manifest and prints NO-GO; default invocation exits before host effects. `run_once(Journal, Operations, deadline)` is the independently testable one-attempt phase/cleanup/report core. There is deliberately **no production `Operations` backend**, no signer and no `--run` flag: the actual host path/image/credential, signer isolation and receipt routes have not been approved or measured. Do not execute a test fake as an operator procedure. This PR does not claim a complete executable handoff.
+`operator_lifecycle.py --review` remains a **read-only repository check**, not a host entry. `run_once(Journal, Operations, deadline)` is the offline-tested phase/cleanup/report core. The separately reviewed `operator_host.py` now implements a dormant, command-bounded backend and root entry; `root_signer.py` implements a root-only one-shot signer. See [`OPERATOR_INSTALL.md`](OPERATOR_INSTALL.md) for their exact merged-byte staging contract and private operator inputs. **Neither is installed or authorized to run.** No live host/image/credential/manager App exclusivity or post-cleanup route has been proved here. A CLI `--execute` switch does not close those gates.
 
 ## Single-entry effect contract for the future backend
 
@@ -9,10 +9,11 @@ A later reviewed root entry can construct one `Journal` under a fresh `0700` own
 | Phase | Required backend behavior / outcome |
 | --- | --- |
 | `preflight` | Read-only review of immutable runner/context/authority, #43 issue/body/unused branch, private state and historical-run exclusion, exact helper hashes, image/venv, operator-approved baseline and mount/network gates. Do not repeat the already accepted route fixture. |
-| `login` | Later, separate operator consent for a bounded device-login pause into the isolated, refreshable home. Preserve partial login on failure; no inferred inference entitlement. |
+| `start_isolation` | Future root entry only: bounded proxy/network/firewall and one sleeping inbox worker with attempt labels and exact IDs. An ambiguous partial startup preserves the journal and unknown resources for root reconciliation; no guessed cleanup. |
+| `login` | Later, separate operator consent for a bounded device-login handoff into the isolated, refreshable home. Preserve partial login on failure; no inferred inference entitlement. |
 | `github_reads` | Through the *actual isolated worker* adapter: authenticated `GET /user`, #43 and exact branch/PR/check-run paths plus `git ls-remote`, without printing credentials. A preparation-shell `gh` request does not count. |
 | `enroll_disabled` | Only after manager-only signer proof, create one fresh #41/#45 enrollment, snapshot cursors and return exact owned enrollment identity. A prior state/claim blocks. |
-| `enable_scheduler` | Only after a separate scheduler approval; install an owned, non-LLM five-minute tick timer with exact ID and no second consumer. No existing Hermes gateway/profile. |
+| `enable_inbox` | Only inside the separately approved, bounded single entry; no timer or second consumer is installed. Before this phase enrollment is disabled. |
 | `one_bridge_claim` | Wait only within the reviewed bound for a new exact manager App comment plus a separately signed immutable grant. `Inbox.tick` durably claims and calls `BridgeQueue -> Bridge.once` once. The direct `bridge_once_candidate.py` is not called for the same task. Return exact attempt-owned worker identity; preserve queue/journal/worktree on uncertain result. |
 | `reconcile` | Read-only inspect queue and Bridge journal, actual local branch/worktree and remote issue/branch/draft/head/CI. Never treat a checkpoint or a status comment as a task success. |
 | `cleanup` | First inspect exact IDs **and** provenance labels/image/network/chain ownership. Remove only attempt-owned worker, proxy, scoped firewall rules and isolated networks in dependency order; disable only owned timer/enrollment after claim stops. Never delete queue, auth, context, worktree, checkpoint, old release or old checkout. An unknown ID/partial firewall rule leaves resources for root reconciliation. Return exact removed identity tuple and independently verify absence plus pre/post baselines. |
@@ -23,5 +24,5 @@ The core records an unresolved effect whenever enrollment, timer, claim, cleanup
 ## Remaining reviews before a runnable single root entry
 
 1. Approve the manager-only signer separation and actual worker permission/mount matrix in [`ops/github_inbox/BOOTSTRAP_REVIEW.md`](../github_inbox/BOOTSTRAP_REVIEW.md); provision private authority/key/public verifier only afterward. The worker's old broad preparation credential must not be accessible from the isolated worker.
-2. Review the exact future host `Operations` adapter and root entry (including authenticated post-cleanup report route), immutable merged-artifact manifest, approved image/UID/venv and all transitive dependencies; test cleanup with command-boundary fakes, not a real VPS attempt.
+2. Review the dormant `operator_host.py` command adapter and post-cleanup route, `operator_artifacts.json` and merged-byte staging procedure, approved image/UID/venv and all transitive dependencies. Existing offline command-boundary tests are **not** a VPS attempt.
 3. Gate any real attempt on private approval/one immutable #43 authorization and an unused branch; never equate this source PR with task execution. The existing host runner `00acd27132b68264ee2ab1692d3024f09c640c6d` and all prior state remain intact. #44's one-container portable restore is subsequent work, not satisfied by this two-service proposal.

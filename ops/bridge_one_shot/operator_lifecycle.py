@@ -16,7 +16,7 @@ from typing import Protocol
 
 
 ID = re.compile(r"[a-zA-Z0-9_.:-]{1,128}\Z")
-PHASES = ("preflight", "login", "github_reads", "enroll_disabled", "enable_scheduler",
+PHASES = ("preflight", "start_isolation", "login", "github_reads", "enroll_disabled", "enable_inbox",
           "one_bridge_claim", "reconcile", "cleanup", "report")
 MAX_JOURNAL = 16384
 
@@ -38,10 +38,11 @@ class Operations(Protocol):
     """Every implementation must impose independent per-stage deadlines."""
 
     def preflight(self) -> None: ...
+    def start_isolation(self) -> tuple[Owned, ...]: ...
     def login(self) -> None: ...
     def github_reads(self) -> None: ...
     def enroll_disabled(self) -> tuple[Owned, ...]: ...
-    def enable_scheduler(self) -> tuple[Owned, ...]: ...
+    def enable_inbox(self) -> tuple[Owned, ...]: ...
     def one_bridge_claim(self) -> tuple[Owned, ...]: ...
     def reconcile(self) -> str: ...
     def inspect_owned(self, resources: tuple[Owned, ...]) -> bool: ...
@@ -128,7 +129,7 @@ class Journal:
         self.state["phase"] = phase
         self.state["intent"] = intent
         if unresolved is not None:
-            if unresolved not in ("enroll_disabled", "enable_scheduler", "one_bridge_claim", "cleanup", "report"):
+            if unresolved not in ("start_isolation", "enroll_disabled", "enable_inbox", "one_bridge_claim", "cleanup", "report"):
                 raise ValueError("unreviewed unresolved effect")
             self.state["unresolved_effect"] = unresolved
         if status is not None:
@@ -152,12 +153,12 @@ def run_once(journal: Journal, ops: Operations, *, deadline: float,
     failure = None
     preflight_done = False
     try:
-        for phase in PHASES[:6]:
+        for phase in PHASES[:7]:
             if clock() >= deadline:
                 raise TimeoutError("overall deadline")
             journal.record(phase, intent=phase)
             value = getattr(ops, phase)()
-            if phase in ("enroll_disabled", "enable_scheduler", "one_bridge_claim"):
+            if phase in ("start_isolation", "enroll_disabled", "enable_inbox", "one_bridge_claim"):
                 if not isinstance(value, tuple) or not all(isinstance(x, Owned) for x in value):
                     raise ValueError("missing exact resource identities")
                 if any(x in owned for x in value) or len(set(value)) != len(value):
@@ -170,9 +171,11 @@ def run_once(journal: Journal, ops: Operations, *, deadline: float,
         failure = type(exc).__name__
         # If an effect fails after intent, identities may be unknown: no guessed cleanup.
         pending = journal.state["intent"]
-        if pending in ("enroll_disabled", "enable_scheduler", "one_bridge_claim"):
+        if pending in ("start_isolation", "enroll_disabled", "enable_inbox", "one_bridge_claim"):
             journal.record("blocked", status="blocked", unresolved=pending)
     try:
+        if clock() >= deadline:
+            raise TimeoutError("overall deadline before reconciliation")
         journal.record("reconcile", intent="reconcile")
         result = ops.reconcile()
         if result not in {"review-ready", "blocked", "unknown"}:
@@ -184,6 +187,8 @@ def run_once(journal: Journal, ops: Operations, *, deadline: float,
     # Reconciliation is read-only; it never clears an unresolved effect.
     uncertain = journal.state["unresolved_effect"] is not None
     try:
+        if clock() >= deadline:
+            raise TimeoutError("overall deadline before cleanup")
         if uncertain:
             raise ValueError("effect intent unresolved")
         if not preflight_done:
@@ -191,11 +196,17 @@ def run_once(journal: Journal, ops: Operations, *, deadline: float,
         journal.record("cleanup", intent="cleanup")
         if ops.inspect_owned(owned) is not True:
             raise ValueError("owned resource identity not verified")
+        if clock() >= deadline:
+            raise TimeoutError("overall deadline during cleanup")
         removed = ops.cleanup(owned)
         if not isinstance(removed, tuple) or removed != owned:
             raise ValueError("exact-ID cleanup incomplete")
+        if clock() >= deadline:
+            raise TimeoutError("overall deadline during cleanup readback")
         if ops.cleanup_readback(owned) is not True:
             raise ValueError("post-cleanup baseline unverified")
+        if clock() >= deadline:
+            raise TimeoutError("overall deadline after cleanup readback")
         journal.record("cleanup", intent=None, cleanup=True, owned=())
     except Exception as exc:
         failure = failure or type(exc).__name__

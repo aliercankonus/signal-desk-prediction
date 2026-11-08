@@ -36,10 +36,11 @@ class FakeOps:
         return value
 
     def preflight(self): return self._call("preflight")
+    def start_isolation(self): return self._call("start_isolation", ())
     def login(self): return self._call("login")
     def github_reads(self): return self._call("github_reads")
     def enroll_disabled(self): return self._call("enroll_disabled", (self.resources[0],))
-    def enable_scheduler(self): return self._call("enable_scheduler", (self.resources[1],))
+    def enable_inbox(self): return self._call("enable_inbox", (self.resources[1],))
     def one_bridge_claim(self): return self._call("one_bridge_claim", (self.resources[2],))
     def reconcile(self): return self._call("reconcile", self.reconciled)
     def inspect_owned(self, resources):
@@ -65,6 +66,36 @@ def _attempt():
     return tempfile.TemporaryDirectory(dir=Path.home(), prefix="sd-issue41-test-")
 
 
+def test_isolation_startup_failure_is_intent_fenced_and_never_cleans_unknown_ids():
+    with _attempt() as root:
+        journal = module.Journal(Path(root) / "attempt1", "attempt1")
+        ops = FakeOps(fail="start_isolation")
+        state = module.run_once(journal, ops, deadline=100, clock=lambda: 0)
+        assert state["unresolved_effect"] == "start_isolation"
+        assert "start_isolation" in ops.calls
+        assert "login" not in ops.calls and "cleanup" not in ops.calls and "report" not in ops.calls
+
+
+def test_expired_total_budget_does_not_begin_unbounded_cleanup():
+    with _attempt() as root:
+        journal = module.Journal(Path(root) / "attempt1", "attempt1")
+        now = [0]
+        ops = FakeOps()
+        def start():
+            ops.calls.append("start_isolation")
+            now[0] = 101
+            return (module.Owned("proxy", "proxy-1", "attempt1"),)
+        ops.start_isolation = start
+        ops.inspect_owned = lambda resources: True
+        ops.cleanup = lambda resources: ops.calls.append("cleanup") or resources
+        ops.cleanup_readback = lambda resources: True
+        state = module.run_once(journal, ops, deadline=100, clock=lambda: now[0])
+        assert state["status"] == "blocked"
+        assert not state["cleanup_verified"]
+        assert "cleanup" not in ops.calls and "report" not in ops.calls
+        assert state["owned"][0]["ident"] == "proxy-1"
+
+
 def test_one_success_and_durable_report_after_exact_cleanup():
     with _attempt() as root:
         journal = module.Journal(Path(root) / "attempt1", "attempt1")
@@ -80,7 +111,7 @@ def test_one_success_and_durable_report_after_exact_cleanup():
                             deadline=100, clock=lambda: 0)
 
 
-@pytest.mark.parametrize("stage", ("enroll_disabled", "enable_scheduler", "one_bridge_claim"))
+@pytest.mark.parametrize("stage", ("enroll_disabled", "enable_inbox", "one_bridge_claim"))
 def test_post_intent_error_preserves_claim_and_refuses_cleanup_or_report(stage):
     with _attempt() as root:
         journal = module.Journal(Path(root) / "attempt1", "attempt1")
