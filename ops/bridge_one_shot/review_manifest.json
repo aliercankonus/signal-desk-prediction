@@ -4,7 +4,7 @@
     "ops/bridge_one_shot/compose.candidate.yml": "9a9d3253c2248311989201a014095be14e7fa2bca0450bc771a3e4d7f13910cf"
   },
   "candidate_runner": "e84021a786004456a12de9e25eae50d191da6cf1",
-  "candidate_task_branch": "docs/issue43-one-shot-review-note",
+  "candidate_task_branch": "issue43-one-shot-review-note",
   "candidate_task_start": "e84021a786004456a12de9e25eae50d191da6cf1",
   "existing_host_runner": "00acd27132b68264ee2ab1692d3024f09c640c6d",
   "frozen_source_sha256": {

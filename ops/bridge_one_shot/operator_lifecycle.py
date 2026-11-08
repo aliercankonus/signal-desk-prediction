@@ -65,10 +65,11 @@ class Journal:
         }
 
     def _private_parent(self):
-        for parent in (self.directory.parent, *self.directory.parents):
+        for parent in self.directory.parents:
             info = parent.lstat()
-            if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
-                raise PermissionError("journal ancestor is writable")
+            if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022 or
+                    info.st_uid not in (0, os.geteuid())):
+                raise PermissionError("journal ancestor is writable or foreign-owned")
 
     def _private(self):
         self._private_parent()

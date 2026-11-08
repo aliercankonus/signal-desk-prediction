@@ -135,6 +135,49 @@ def test_reject_world_writable_ancestor_before_creating_attempt():
     assert not candidate.exists()
 
 
+def test_reject_foreign_owned_nonwritable_ancestor_before_attempt(monkeypatch):
+    import os
+    import stat
+    from types import SimpleNamespace
+    with _attempt() as root:
+        parent = Path(root) / "foreign-readonly"
+        parent.mkdir(mode=0o755)
+        candidate = parent / "attempt1"
+        real_lstat = Path.lstat
+        def foreign_lstat(path, *args, **kwargs):
+            if path == parent:
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=os.getuid() + 1)
+            return real_lstat(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "lstat", foreign_lstat)
+        ops = FakeOps()
+        with pytest.raises(PermissionError, match="ancestor"):
+            module.run_once(module.Journal(candidate, "attempt1"), ops,
+                            deadline=100, clock=lambda: 0)
+        assert not candidate.exists() and ops.calls == []
+
+
+@pytest.mark.parametrize("owner", ("current", "root"))
+def test_trusted_nonwritable_ancestor_allows_private_attempt(monkeypatch, owner):
+    import os
+    import stat
+    from types import SimpleNamespace
+    with _attempt() as root:
+        parent = Path(root) / "trusted-readonly"
+        parent.mkdir(mode=0o755)
+        candidate = parent / "attempt1"
+        actual_lstat = Path.lstat
+        def trusted_lstat(path, *args, **kwargs):
+            if path == parent:
+                return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755,
+                                       st_uid=0 if owner == "root" else os.geteuid())
+            return actual_lstat(path, *args, **kwargs)
+        with monkeypatch.context() as patcher:
+            patcher.setattr(Path, "lstat", trusted_lstat)
+            journal = module.Journal(candidate, "attempt1")
+            journal.create()
+        assert journal.directory.is_dir() and journal.directory.stat().st_mode & 0o077 == 0
+
+
 def test_readback_mismatch_preserves_publication_intent():
     with _attempt() as root:
         journal = module.Journal(Path(root) / "attempt1", "attempt1")
