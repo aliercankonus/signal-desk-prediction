@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 import pytest
 
@@ -17,7 +18,7 @@ bootstrap = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bootstrap)
 
 
-def record(tmp):
+def record(tmp) -> dict[str, Any]:
     base = tmp / 'fresh'
     return dict(source=str(tmp / 'source.git'), merge='eac843de7967d48cce56ee9a198750e98754a2de',
                 bundle=str(base / 'bundle'), runner=str(base / 'runner'), state=str(base / 'state'),
@@ -55,6 +56,8 @@ def test_records_bind_approved_authority_context_enrollment_and_plan(tmp_path):
     assert records['operator-plan.json']['signer_state_root'] == cfg['signer_state_root']
     assert records['context.json']['test_python'] == cfg['test_python']
     assert set(records['operator-plan.json']) == set(bootstrap.PLAN_KEYS)
+    assert records['provider-config.yaml'] == (
+        b'auth:\n  adopt_external_logins: false\n  codex_login_flow: device_code\n')
 
 
 def test_rejects_overlap_and_conflicting_destination_before_any_command(tmp_path):
@@ -81,6 +84,39 @@ def test_command_boundary_is_bounded_sanitized_and_never_executes(tmp_path):
     with pytest.raises(ValueError, match='command'):
         bootstrap.command(['sh', '-c', 'echo forbidden'], run=fake)
     assert len(calls) == 1
+
+
+def test_production_validator_accepts_only_static_compose_render(tmp_path):
+    cfg = record(tmp_path)
+    argv = ['docker','compose','--env-file','/dev/null','-f',
+            cfg['bundle'] + '/compose.operator.yml','--profile','execution',
+            'config','--format','json']
+    env = {k:'reviewed-offline-value' for k in ('HERMES_IMAGE_REF','HERMES_UID','HERMES_GID',
+        'SD_ATTEMPT_ID','BRIDGE_RUNNER_HOST','BRIDGE_STATE_PARENT_HOST','BRIDGE_AUTH_DIR_HOST',
+        'BRIDGE_CONTEXT_DIR_HOST','BRIDGE_HOME_HOST','BRIDGE_VENV_HOST',
+        'BRIDGE_INBOX_CONFIG_HOST','BRIDGE_REVIEW_HOST')}
+    seen = []
+    def fake(argv, *, timeout):
+        seen.append((argv, timeout))
+        return b'{"services":{}}'
+    assert bootstrap.command(argv, env=env, run=fake) == b'{"services":{}}'
+    assert seen == [(argv, 15)]
+    for bad in (argv[:-3] + ['up','--format','json'],
+                argv[:5] + [cfg['bundle'] + '/other.yml'] + argv[6:],
+                argv[:5] + [cfg['bundle'] + '/../compose.operator.yml'] + argv[6:],
+                argv[:3] + ['/private/other'] + argv[4:],
+                argv + ['--profiles'],
+                ['docker','compose','run','inbox-worker'],
+                ['docker','compose','exec','inbox-worker','sh'],
+                ['docker','compose','build'], ['docker','compose','pull']):
+        with pytest.raises(ValueError):
+            bootstrap.command(bad, env=env, run=fake)
+    for bad_env in ({}, {**env, 'BRIDGE_EXTRA':'x'},
+                    {**env, 'HERMES_UID':'x\nINJECTED=y'},
+                    {**env, 'WORKER_TOKEN':'forbidden'}):
+        with pytest.raises(ValueError, match='command'):
+            bootstrap.command(argv, env=bad_env, run=fake)
+    assert len(seen) == 1
 
 
 def test_real_subprocess_output_limit_stops_before_unbounded_capture():
@@ -134,6 +170,10 @@ def test_durable_spec_and_staging_fence_do_not_auto_execute():
     assert '--stage --spec' in stage_block and 'operator_host.py' not in stage_block
     assert 'STAGED ONLY' in stage_block
     assert 'operator_host.py" --execute' in blocks[-1]
+    login = blocks[1]
+    assert 'hermes auth add openai-codex --type oauth --no-browser' in login
+    assert 'HOME=/worker-home' in login and 'HERMES_HOME=/worker-home' in login
+    assert 'timeout --foreground' in login
 
 
 def test_static_compose_rejects_root_secret_or_unexpected_worker_bind(tmp_path):
@@ -224,9 +264,9 @@ def test_stages_from_real_local_git_without_runtime_or_credential_values(monkeyp
         mkdir = bootstrap._mkdir
         monkeypatch.setattr(bootstrap, '_mkdir', lambda path, owner, group:
             None if str(path) == bootstrap.SIGNER_STATE else mkdir(path, owner, group))
-        original = bootstrap.command
+        original = bootstrap._bounded_run
         calls = []
-        def offline(argv, *, run=None, env=None):
+        def offline(argv, *, timeout, env=None):
             calls.append(argv)
             if argv[:3] == ['docker', 'image', 'inspect']:
                 return (cfg['image'] + '\n').encode() if '{{.Id}}' in argv else b'[]'
@@ -235,14 +275,21 @@ def test_stages_from_real_local_git_without_runtime_or_credential_values(monkeyp
             if argv[:2] == ['docker', 'compose']:
                 return json.dumps(compose_record(cfg)).encode()
             assert argv[0] == 'git'
-            return original(argv, run=run)
-        monkeypatch.setattr(bootstrap, 'command', offline)
+            return original(argv, timeout=timeout, env=env)
+        monkeypatch.setattr(bootstrap, '_bounded_run', offline)
         assert bootstrap.stage(cfg).startswith('STAGED ONLY')
         assert all('up' not in argv and '--execute' not in argv for argv in calls)
         assert json.loads(Path(cfg['plan']).read_text())['merge'] == bootstrap.MERGE
         assert json.loads(Path(cfg['signer_policy']).read_text())['authority_identity'] == (
             bootstrap.build_records(cfg, Path(cfg['signer_public']).read_bytes())['signer-policy.json']['authority_identity'])
         assert (Path(cfg['state']) / 'queue').is_dir()
+        home = Path(cfg['home'])
+        assert {x.name for x in home.iterdir()} == {'config.yaml'}
+        assert (home / 'config.yaml').read_bytes() == (
+            b'auth:\n  adopt_external_logins: false\n  codex_login_flow: device_code\n')
+        assert (home / 'config.yaml').stat().st_mode & 0o777 == 0o600
+        assert (ROOT / 'ops/bridge_one_shot/compose.operator.yml').read_text().count(
+            'HERMES_HOME: /worker-home') == 1
         assert not (Path(cfg['state']) / 'github-inbox').exists()
         assert {x.name for x in Path(cfg['bundle']).iterdir()} == {
             Path(x).name for x in bootstrap.ARTIFACTS} | {'merged-byte-manifest.json'}

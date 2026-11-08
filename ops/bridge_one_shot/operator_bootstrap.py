@@ -46,10 +46,21 @@ SPEC_KEYS = (set(PLAN_KEYS) | {'plan', 'task_body_sha256', 'requirements_sha256'
     'python_version', 'pytest_version', 'test_python', 'start', 'cursors',
     'git_name', 'git_email', 'excluded_roots'})
 STAGING_DEADLINE = None
+COMPOSE_ENV_KEYS = frozenset(('HERMES_IMAGE_REF','HERMES_UID','HERMES_GID',
+    'SD_ATTEMPT_ID','BRIDGE_RUNNER_HOST','BRIDGE_STATE_PARENT_HOST','BRIDGE_AUTH_DIR_HOST',
+    'BRIDGE_CONTEXT_DIR_HOST','BRIDGE_HOME_HOST','BRIDGE_VENV_HOST',
+    'BRIDGE_INBOX_CONFIG_HOST','BRIDGE_REVIEW_HOST'))
+# Matches the reviewed Hermes config-set output, but is staged only into a
+# fresh dedicated worker home. Never import an operator/agent auth store.
+PROVIDER_CONFIG = b'auth:\n  adopt_external_logins: false\n  codex_login_flow: device_code\n'
 
 
 def command(argv, *, run=None, env=None):
     """Bounded, non-shell administrative command with no ambient auth/config."""
+    compose = (isinstance(argv, list) and len(argv) == 11 and
+        argv[:5] == ['docker','compose','--env-file','/dev/null','-f'] and
+        isinstance(argv[5], str) and argv[5].endswith('/compose.operator.yml') and
+        argv[6:] == ['--profile','execution','config','--format','json'])
     if (not isinstance(argv, list) or not argv or argv[0] not in ('git', 'docker') or
             any(not isinstance(a, str) or '\x00' in a for a in argv) or
             any(a in ('--execute', 'up', 'tick', 'run', 'sign', 'publish', 'push') for a in argv) or
@@ -57,8 +68,16 @@ def command(argv, *, run=None, env=None):
             (argv[0] == 'git' and len(argv) > 1 and argv[1] not in
              ('clone', '-C', 'cat-file', 'merge-base') and not argv[1].startswith('--git-dir=')) or
             (argv[0] == 'docker' and (len(argv) < 2 or argv[1] not in
-             ('ps', 'inspect', 'image', 'network')))):
+             ('ps', 'inspect', 'image', 'network') and not compose)) or
+            (compose and (set(env or {}) != COMPOSE_ENV_KEYS or
+             any(not isinstance(value, str) or '\n' in value or '\x00' in value
+                 for value in (env or {}).values())))):
         raise ValueError('command outside staging scope')
+    if compose:
+        _path(argv[5])
+    if env and any(not k.isupper() or any(word in k for word in
+        ('TOKEN','KEY','SECRET','PASSWORD')) for k in env):
+        raise ValueError('secret or invalid command environment')
     if run is not None:
         return run(argv, timeout=15)
     remaining = 15 if STAGING_DEADLINE is None else min(15, STAGING_DEADLINE - time.monotonic())
@@ -68,9 +87,6 @@ def command(argv, *, run=None, env=None):
              'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
              'GIT_TERMINAL_PROMPT': '0', 'GCM_INTERACTIVE': 'never'}
     if env:
-        if any(not k.isupper() or any(word in k for word in ('TOKEN','KEY','SECRET','PASSWORD'))
-               for k in env):
-            raise ValueError('secret or invalid command environment')
         clean.update(env)
     return _bounded_run(argv, env=clean, timeout=remaining)
 
@@ -226,7 +242,8 @@ def build_records(cfg, public):
                'timer': 'DISABLED', 'scope': 'one bounded in-process attempt only'}
     return {'authorization.json': policy, 'context.json': context,
             'enrollment.json': enrollment, 'signer-policy.json': scope,
-            'operator-plan.json': plan, 'handoff.json': handoff}
+            'operator-plan.json': plan, 'handoff.json': handoff,
+            'provider-config.yaml': PROVIDER_CONFIG}
 
 
 def _trusted(path, *, owner, private=False):
@@ -427,6 +444,7 @@ def _stage_once(cfg):
             (paths['plan'],'operator-plan.json',0,0),
             (paths['plan'].parent / (paths['plan'].stem + '-handoff.json'),'handoff.json',0,0)):
         _write(target, records[name], owner, group)
+    _write(paths['home'] / 'config.yaml', records['provider-config.yaml'], cfg['uid'], cfg['gid'])
     _write(paths['inbox'] / 'manager-public.pem', public, cfg['uid'], cfg['gid'])
     # No network, signer, device login, enrollment, timer or task dispatch.
     return 'STAGED ONLY — activation NO-GO; manager-exclusive invocation UNPROVEN; --execute not called'
