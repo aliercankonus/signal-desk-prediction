@@ -167,7 +167,7 @@ def test_exact_attempt_start_and_cleanup_with_inert_docker_boundary(tmp_path):
         (inbox / 'state.json').chmod(0o600)
         worker, proxy = 'a' * 64, 'b' * 64
         network_ids = {'worker_isolated': 'c' * 64, 'proxy_uplink': 'd' * 64}
-        cfg = dataclasses.replace(plan(), state=state, uid=os.geteuid())
+        cfg = dataclasses.replace(plan(), state=state, uid=max(1, os.geteuid()))
         class Platform(FakeRunner):
             def __call__(self, argv, *, timeout, env=None, input=None):
                 argv = tuple(argv)
@@ -263,7 +263,7 @@ def test_root_scope_must_match_private_worker_authorization_and_public_key():
             authority_identity=identity, runner_commit=private_policy['base'],
             start='2026-11-08T00:00:00Z', cursors={'41': 1, '45': 2}, app_id=1144995)
         cfg = dataclasses.replace(plan(), auth=auth, inbox=inbox,
-                                  signer_public=root_public, uid=os.geteuid())
+                                  signer_public=root_public, uid=max(1, os.geteuid()))
         host.check_signer_binding(cfg, scope)
         record['public_key_sha256'] = '0' * 64
         (inbox / 'enrollment.json').write_text(json.dumps(record))
@@ -281,7 +281,7 @@ def test_cleanup_readback_rejects_symlinked_inbox_state(monkeypatch):
         inbox = state / 'github-inbox'; inbox.mkdir(mode=0o700)
         target = parent / 'other.json'; target.write_text('{"enabled": false}')
         (inbox / 'state.json').symlink_to(target)
-        cfg = dataclasses.replace(plan(), state=state, uid=os.geteuid())
+        cfg = dataclasses.replace(plan(), state=state, uid=max(1, os.geteuid()))
         ops = host.HostOperations(cfg, runner=FakeRunner())
         ops.enrollment_inode = str(inbox.stat().st_ino)
         ops.baseline = ('', '')

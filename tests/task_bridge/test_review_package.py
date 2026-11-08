@@ -1,5 +1,6 @@
 """Offline checks for immutable #41 inputs across later follow-up edits."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -24,8 +25,15 @@ def _snapshot(tmp_path):
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, destination)
     name = 'ops/bridge_one_shot/worker_firewall.sh'
-    (root / name).write_bytes(subprocess.check_output([
-        'git', '-C', str(ROOT), 'show', manifest['reviewed_main'] + ':' + name]))
+    # The CI image copies source without .git. Remove only this PR's two
+    # additions; the pinned digest then proves the reconstructed old blob.
+    updated = (root / name).read_bytes()
+    old = updated.replace(b'PATH=/usr/sbin:/sbin:/usr/bin:/bin\nexport PATH\n', b'', 1).replace(
+        b'for tool in iptables ip docker python3 wc; do\n'
+        b'  command -v "$tool" >/dev/null || { echo "NO-GO: required host tool unavailable: $tool" >&2; exit 2; }\n'
+        b'done\n', b'', 1)
+    assert old != updated and hashlib.sha256(old).hexdigest() == manifest['frozen_source_sha256'][name]
+    (root / name).write_bytes(old)
     return root
 
 
