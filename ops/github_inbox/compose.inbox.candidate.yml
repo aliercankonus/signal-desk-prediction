@@ -1,0 +1,124 @@
+# REVIEW ONLY: separate inbox candidate; does not install, enable or run a scheduler.
+# REVIEW ONLY: this profile is not an approval gate. Do not run `up` from review.
+name: signal-desk-bridge-once
+x-base: &base
+  image: ${HERMES_IMAGE_REF:?Host-inspected immutable Hermes image ID required}
+  user: "${HERMES_UID:?Host-inspected UID required}:${HERMES_GID:?Host-inspected GID required}"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:rw,nosuid,nodev,size=64m"]
+  stop_signal: SIGTERM
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options: {max-size: "5m", max-file: "2"}
+services:
+  bridge-once:
+    <<: *base
+    profiles: [execution]
+    entrypoint: ["/opt/hermes/.venv/bin/python"]
+    command: ["-I", "-B", "/opt/bridge-once.py"]
+    environment:
+      HOME: /worker-home
+      HERMES_HOME: /worker-home
+      GIT_CONFIG_GLOBAL: /worker-home/gitconfig
+      GIT_CONFIG_NOSYSTEM: "1"
+      TERMINAL_ENV: local
+      TMPDIR: /tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+      HTTPS_PROXY: http://172.30.50.3:3128
+      HTTP_PROXY: http://172.30.50.3:3128
+      ALL_PROXY: http://172.30.50.3:3128
+      NO_PROXY: ""
+      RUNNER: /workspace/runner
+      QUEUE_ROOT: /state/queue
+      AUTH_FILE: /private/auth/authorization.json
+      CONTEXT_FILE: /private/context/context.json
+      BRIDGE_ONCE_APPROVED: ${BRIDGE_ONCE_APPROVED:-no}
+    working_dir: /workspace/runner
+    networks:
+      worker_isolated: {ipv4_address: 172.30.50.2}
+    cpus: 1.0
+    mem_limit: 1536m
+    pids_limit: 128
+    restart: "no"
+    depends_on:
+      connect-proxy: {condition: service_started}
+    volumes:
+      - type: bind
+        source: ${BRIDGE_RUNNER_HOST:?Separate clean reviewed clone required}
+        target: /workspace/runner
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BRIDGE_STATE_PARENT_HOST:?Dedicated private queue and inbox parent required}
+        target: /state
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BRIDGE_AUTH_DIR_HOST:?Separate private authorization directory required}
+        target: /private/auth
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BRIDGE_CONTEXT_DIR_HOST:?Separate private context directory required}
+        target: /private/context
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BRIDGE_HOME_HOST:?Dedicated private Hermes and Git credentials home required}
+        target: /worker-home
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BRIDGE_VENV_HOST:?Private test venv bind source required}
+        target: /opt/data/signal-desk-tooling/venvs/issue26-recovery-python314-20261030
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BRIDGE_REVIEW_HOST:?Read-only reviewed helper bundle required}/bridge_once_candidate.py
+        target: /opt/bridge-once.py
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BRIDGE_INBOX_CONFIG_HOST:?Private enrollment and public verifier directory required}
+        target: /private/inbox
+        read_only: true
+        bind: {create_host_path: false}
+  connect-proxy:
+    <<: *base
+    profiles: [execution]
+    user: "65534:65534"
+    entrypoint: ["/opt/hermes/.venv/bin/python"]
+    command: ["-B", "/opt/connect-proxy.py"]
+    environment: {HOME: /tmp, PYTHONDONTWRITEBYTECODE: "1"}
+    networks:
+      worker_isolated: {ipv4_address: 172.30.50.3}
+      proxy_uplink: {}
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    restart: "no"
+    volumes:
+      - type: bind
+        source: ${BRIDGE_REVIEW_HOST:?Read-only reviewed helper bundle required}/connect_proxy.py
+        target: /opt/connect-proxy.py
+        read_only: true
+        bind: {create_host_path: false}
+networks:
+  worker_isolated:
+    driver: bridge
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-sd-once
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+    ipam:
+      config: [{subnet: 172.30.50.0/28}]
+  proxy_uplink:
+    driver: bridge
+    internal: false
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.name: br-sd-uplink
+    ipam:
+      config: [{subnet: 172.30.51.0/28}]
