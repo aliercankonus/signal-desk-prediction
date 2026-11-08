@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "runner_commit": "e84021a786004456a12de9e25eae50d191da6cf1",
+  "files": [
+    "ops/bridge_one_shot/bridge_readback.py",
+    "ops/bridge_one_shot/compose.operator.yml",
+    "ops/bridge_one_shot/connect_proxy.py",
+    "ops/bridge_one_shot/network_preflight.py",
+    "ops/bridge_one_shot/network_resources.py",
+    "ops/bridge_one_shot/operator_artifacts.json",
+    "ops/bridge_one_shot/operator_host.py",
+    "ops/bridge_one_shot/operator_lifecycle.py",
+    "ops/bridge_one_shot/worker_firewall.sh",
+    "ops/github_inbox/root_signer.py",
+    "ops/github_inbox/worker_probe.py"
+  ]
+}

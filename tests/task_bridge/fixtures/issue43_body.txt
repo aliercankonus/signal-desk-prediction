@@ -1,0 +1,16 @@
+Create exactly one English Markdown documentation file, `docs/ONE_SHOT_REVIEW_NOTE.md`, from the UTF-8 content below. Preserve its bytes exactly, including the final newline. Do not modify any other tracked or untracked file, workflow, configuration, application service, or existing documentation. Do not copy credentials or private paths into the file.
+
+```markdown
+# Bounded one-shot Bridge review note
+
+This note describes a proposed, manually authorized workflow; it is not an execution receipt.
+
+- A dedicated runner and isolated worker home do not authorize a task.
+- For the reviewed one-shot scope, the operator reported route-enforced off-link denial; scoped firewall rules are a conditional backstop, not an observed DROP for those packets.
+- A credential-free fixture or provider login does not prove inference entitlement or GitHub write permission.
+- The child may edit, test, commit, and push only the frozen artifact; the Bridge owns draft PR publication.
+- Preserve ambiguous queue, run, and publication state for read-only reconciliation; never retry automatically.
+- A draft PR is reviewable, not merged or deployed.
+```
+
+Acceptance: verify the file bytes against this fenced block, run the approved test command through the private execution context, commit only this file on the approved task branch, and push that branch once. Do not create a PR yourself; the reviewed Bridge owns draft creation and verification. If the interpreter, task scope, identity, tests, or push is blocked, preserve evidence and stop rather than installing, changing scope, or retrying.
