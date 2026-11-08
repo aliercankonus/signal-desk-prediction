@@ -107,13 +107,14 @@ def test_existing_container_mount_overlap_blocks_staging_before_writes(monkeypat
 
 
 def test_nearest_ancestor_checks_directory_not_private_file(tmp_path):
-    parent = tmp_path / 'private'
-    parent.mkdir(mode=0o700)
-    private_file = parent / 'key.pem'
-    private_file.touch(mode=0o600)
-    bootstrap._nearest(private_file.parent, os.geteuid())
-    with pytest.raises(PermissionError):
-        bootstrap._nearest(private_file, os.geteuid())
+    with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        parent = Path(directory) / 'private'
+        parent.mkdir(mode=0o700)
+        private_file = parent / 'key.pem'
+        private_file.touch(mode=0o600)
+        bootstrap._nearest(private_file.parent, os.geteuid())
+        with pytest.raises(PermissionError):
+            bootstrap._nearest(private_file, os.geteuid())
 
 
 def test_missing_manager_exclusivity_remains_explicit_no_go(tmp_path):
@@ -175,14 +176,43 @@ def test_stages_from_real_local_git_without_runtime_or_credential_values(monkeyp
         for excluded in cfg['excluded_roots']:
             Path(excluded).mkdir()
         Path(cfg['venv']).mkdir(mode=0o700)
-        (Path(cfg['venv']) / 'pyvenv.cfg').write_text('home = /reviewed/runtime\n')
+        venv_config = Path(cfg['venv']) / 'pyvenv.cfg'
+        venv_config.write_text('home = /reviewed/runtime\n')
+        if os.geteuid() == 0:
+            os.chown(Path(cfg['venv']), cfg['uid'], cfg['gid'])
+            os.chown(venv_config, cfg['uid'], cfg['gid'])
         private = root / 'private'
         private.mkdir(mode=0o700)
         Path(cfg['signer_public']).write_bytes(b'-----BEGIN PUBLIC KEY-----\nfixture only\n')
         for key in ('signer_token', 'signer_key'):
             Path(cfg[key]).touch()  # existence only; no credential inputs in tests
-        subprocess.run(['git', 'clone', '--bare', '--no-hardlinks', '-q', str(ROOT), cfg['source']],
+        # CI copies source without .git; construct a real minimal two-commit
+        # object store from the pinned inventory, never fabricate Git output.
+        source_tree = root / 'source-tree'
+        source_tree.mkdir()
+        def git(*args):
+            return subprocess.check_output(['git','-C',str(source_tree),
+                '-c','user.name=Offline Fixture','-c','user.email=offline@example.invalid',
+                *args], timeout=15).decode().strip()
+        git('init','-q')
+        (source_tree / 'requirements.txt').write_bytes((ROOT / 'requirements.txt').read_bytes())
+        git('add','requirements.txt')
+        git('commit','-q','-m','fixture runner')
+        runner_pin = git('rev-parse','HEAD')
+        for path in bootstrap.ARTIFACTS - {'ops/bridge_one_shot/operator_artifacts.json'}:
+            target = source_tree / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((ROOT / path).read_bytes())
+        index = {'schema':1,'runner_commit':runner_pin,'files':sorted(bootstrap.ARTIFACTS)}
+        (source_tree / 'ops/bridge_one_shot/operator_artifacts.json').write_text(json.dumps(index))
+        git('add','ops')
+        git('commit','-q','-m','fixture reviewed bundle')
+        merge_pin = git('rev-parse','HEAD')
+        subprocess.run(['git', 'clone', '--bare', '--no-hardlinks', '-q', str(source_tree), cfg['source']],
                        check=True, timeout=30)
+        monkeypatch.setattr(bootstrap, 'RUNNER_PIN', runner_pin)
+        monkeypatch.setattr(bootstrap, 'MERGE', merge_pin)
+        cfg['merge'] = merge_pin
         requirements = subprocess.check_output(['git', '--git-dir=' + cfg['source'], 'show',
             bootstrap.RUNNER_PIN + ':requirements.txt'], timeout=15)
         cfg['requirements_sha256'] = hashlib.sha256(requirements).hexdigest()
@@ -233,7 +263,10 @@ def test_image_mismatch_stops_before_staging_anything(monkeypatch):
             Path(cfg[key]).touch()
         Path(cfg['signer_public']).write_bytes(b'-----BEGIN PUBLIC KEY-----\nfixture only\n')
         Path(cfg['venv']).mkdir()
-        (Path(cfg['venv']) / 'pyvenv.cfg').touch()
+        venv_config = Path(cfg['venv']) / 'pyvenv.cfg'
+        venv_config.touch()
+        if os.geteuid() == 0:
+            os.chown(venv_config, cfg['uid'], cfg['uid'])
         monkeypatch.setattr(bootstrap.os, 'geteuid', lambda: 0)
         monkeypatch.setattr(bootstrap, '_trusted', lambda *_, **__: None)
         monkeypatch.setattr(bootstrap, '_regular', lambda *_, **__: None)
