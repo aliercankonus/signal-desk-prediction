@@ -35,14 +35,14 @@ def test_exact_operator_fence_and_syntax():
 def test_absent_candidates_are_normal_missing_not_go():
     _, module = source_and_module()
     report, missing = module['inventory']({}, run=lambda argv, **kw: b'')
-    assert report['source'] == ('MISSING', 'NOT_CONFIGURED: protected bare store path')
-    assert report['source_objects'][0] == 'MISSING'
-    assert report['signer_key'][0] == 'MISSING'
+    assert report['source'][0] == 'NOT_CONFIGURED'
+    assert report['source_objects'][0] == 'UNPROVEN'
+    assert report['signer_key'][0] == 'NOT_CONFIGURED'
     assert report['image_internal_isolation'][0] == 'UNPROVEN'
     assert report['manager_exclusive_invocation'][0] == 'UNPROVEN'
     assert report['persistent_worker'][0] == 'UNPROVEN'
-    assert 'source' in missing
-    assert all(value[0] in ('PRESENT', 'MISSING', 'UNPROVEN') for value in report.values())
+    assert 'source' not in missing
+    assert all(value[0] in ('PRESENT', 'MISSING', 'UNPROVEN', 'NOT_CONFIGURED') for value in report.values())
 
 
 def test_untrusted_and_symlinked_candidates_fail_closed():
@@ -334,3 +334,77 @@ def test_normal_tmpfs_has_no_host_source_to_compare(monkeypatch):
     report, _ = module['inventory']({}, run=module['bounded'])
     assert report['container_mounts'][0] == 'UNPROVEN'
     assert report['image'][0] == 'PRESENT'
+
+
+@pytest.mark.parametrize('raw', [
+    '[]', '{"extra":"value"}', '{"source":true}',
+    '{"source":"/one","source":"/two"}', '{"source":"relative"}',
+    '{"source":"/"}', '{"image":"latest"}', '{"container":"worker"}',
+    '{"source":"/private/../other"}', 'x' * 8193,
+])
+def test_private_candidate_payload_rejected_before_any_reads(monkeypatch, capsys, raw):
+    _, module = source_and_module()
+    monkeypatch.setenv('SD_INVENTORY_CANDIDATES', raw)
+    monkeypatch.setattr(module['os'], 'geteuid', lambda: 0)
+    module['ask'] = lambda *a: pytest.fail('invalid noninteractive payload must not prompt')
+    module['inventory'] = lambda *a: pytest.fail('invalid payload must not reach inventory')
+    module['main']()
+    output = capsys.readouterr().out
+    assert 'OVERALL: NO-GO' in output
+    assert '/private' not in output and raw not in output
+
+
+def test_empty_private_payload_never_prompts_or_tries_container_venv(monkeypatch, capsys):
+    _, module = source_and_module()
+    monkeypatch.setenv('SD_INVENTORY_CANDIDATES', '{}')
+    monkeypatch.setattr(module['os'], 'geteuid', lambda: 0)
+    module['ask'] = lambda *a: pytest.fail('private input must not prompt')
+    # Real inventory/validator, fake only Docker subprocess I/O.
+    seen, _, _ = offline_docker(monkeypatch, module)
+    original = module['trusted']
+    def no_fallback(value, **kw):
+        assert not value.startswith('/opt/data')
+        return original(value, **kw)
+    module['trusted'] = no_fallback
+    module['main']()
+    output = capsys.readouterr().out
+    assert 'INPUT_MODE: PRIVATE_CANDIDATES' in output
+    assert 'VENV: NOT_CONFIGURED' in output
+    assert 'SOURCE: NOT_CONFIGURED' in output
+    assert 'OVERALL: NO-GO' in output
+    assert all(row[:2] == ['/usr/bin/docker', 'ps'] for row in seen)
+
+
+def test_private_candidates_use_real_validator_without_echo_or_secret_read(monkeypatch, capsys):
+    _, module = source_and_module()
+    seen, cid, image = offline_docker(monkeypatch, module)
+    import json
+    monkeypatch.setenv('SD_INVENTORY_CANDIDATES', json.dumps({
+        'source':'/nonexistent-private-candidate', 'container':cid, 'image':image}))
+    monkeypatch.setattr(module['os'], 'geteuid', lambda: 0)
+    module['ask'] = lambda *a: pytest.fail('candidate mode must not prompt')
+    module['main']()
+    output = capsys.readouterr().out
+    assert 'SOURCE: MISSING' in output
+    assert 'IMAGE: PRESENT' in output
+    assert '/nonexistent-private-candidate' not in output
+    assert cid not in output and image not in output
+    assert 'OVERALL: NO-GO' in output
+    assert any(row[-1] == cid for row in seen)
+    assert all('SD_INVENTORY_CANDIDATES' not in module['ENV'] for _ in seen)
+
+
+def test_host_venv_symlink_interpreter_is_unproven_without_execution(monkeypatch, tmp_path):
+    _, module = source_and_module()
+    host = tmp_path / 'host-venv'
+    (host / 'bin').mkdir(parents=True)
+    (host / 'pyvenv.cfg').write_text('version = fixture\n')
+    (host / 'bin/python').symlink_to('/unavailable-container-interpreter')
+    original = module['trusted']
+    module['trusted'] = lambda value, **kw: True if value == str(host) else original(value, **kw)
+    seen, _, _ = offline_docker(monkeypatch, module)
+    report, missing = module['inventory']({'venv':str(host)}, run=module['bounded'])
+    assert report['venv'][0] == 'PRESENT'
+    assert report['interpreter'][0] == 'UNPROVEN'
+    assert 'interpreter' not in missing
+    assert all(row[:2] == ['/usr/bin/docker', 'ps'] for row in seen)
