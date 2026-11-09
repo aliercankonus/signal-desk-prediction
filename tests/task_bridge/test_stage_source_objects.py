@@ -142,6 +142,29 @@ def test_failed_transfer_preserves_refs_and_does_not_retry(local_store, monkeypa
     assert m.snapshot(store, m.run_git) == before
 
 
+def test_wrong_ancestry_stops_after_transfer_without_claiming_success(local_store, monkeypatch, capsys):
+    m, store, before, seen, _ = local_store
+    original = m.PINS
+    # Every object exists after the real transfer, but a newer commit cannot be
+    # an ancestor of the older adapter. Refuse rather than weaken the pin gate.
+    monkeypatch.setattr(m, 'PINS', (original[0], original[1], original[3], original[3], original[4]))
+    with pytest.raises(m.Stop):
+        m.prepare(str(store), apply=True)
+    assert m.snapshot(store, m.run_git) == before
+    assert sum('fetch' in argv for argv in seen) == 1
+    assert 'SOURCE_OBJECTS: VERIFIED' not in capsys.readouterr().out
+
+
+def test_existing_noncommit_object_is_not_repaired_or_fetched(local_store, monkeypatch):
+    m, store, before, seen, _ = local_store
+    _, head = m.run_git(store, ('rev-parse', 'refs/heads/preserved^{tree}'))
+    monkeypatch.setattr(m, 'PINS', (head.decode().strip(), *m.PINS[1:]))
+    with pytest.raises(m.Stop, match='WRONG_OBJECT_TYPE'):
+        m.prepare(str(store), apply=True)
+    assert not any('fetch' in argv for argv in seen)
+    assert m.snapshot(store, m.run_git) == before
+
+
 def test_nonroot_and_symlink_store_are_rejected_before_commands(monkeypatch, tmp_path):
     m = load()
     def forbidden(*a, **kw):
