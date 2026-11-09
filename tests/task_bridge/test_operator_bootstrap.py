@@ -262,8 +262,19 @@ def test_stages_from_real_local_git_without_runtime_or_credential_values(monkeyp
         monkeypatch.setattr(bootstrap, '_trusted', lambda *_, **__: None)
         monkeypatch.setattr(bootstrap, '_regular', lambda *_, **__: None)
         mkdir = bootstrap._mkdir
-        monkeypatch.setattr(bootstrap, '_mkdir', lambda path, owner, group:
-            None if str(path) == bootstrap.SIGNER_STATE else mkdir(path, owner, group))
+        order = []
+        def tracked_mkdir(path, owner, group):
+            if str(path) == bootstrap.SIGNER_STATE:
+                return None
+            if path == Path(cfg['runner']):
+                order.append(('mkdir-runner', owner, group))
+            return mkdir(path, owner, group)
+        monkeypatch.setattr(bootstrap, '_mkdir', tracked_mkdir)
+        transfer = bootstrap._chown_fresh_tree
+        def tracked_transfer(path, owner, group):
+            order.append(('transfer-runner', owner, group))
+            return transfer(path, owner, group)
+        monkeypatch.setattr(bootstrap, '_chown_fresh_tree', tracked_transfer)
         original = bootstrap._bounded_run
         calls = []
         def offline(argv, *, timeout, env=None):
@@ -275,9 +286,16 @@ def test_stages_from_real_local_git_without_runtime_or_credential_values(monkeyp
             if argv[:2] == ['docker', 'compose']:
                 return json.dumps(compose_record(cfg)).encode()
             assert argv[0] == 'git'
+            if argv[:3] == ['git', '-C', cfg['runner']]:
+                order.append(('root-git', argv[3]))
             return original(argv, timeout=timeout, env=env)
         monkeypatch.setattr(bootstrap, '_bounded_run', offline)
         assert bootstrap.stage(cfg).startswith('STAGED ONLY')
+        assert order == [('mkdir-runner', 0, 0),
+                         ('root-git', 'checkout'), ('root-git', 'remote'),
+                         ('root-git', 'config'), ('root-git', 'config'),
+                         ('root-git', 'rev-parse'), ('root-git', 'status'),
+                         ('transfer-runner', cfg['uid'], cfg['gid'])]
         assert all('up' not in argv and '--execute' not in argv for argv in calls)
         assert json.loads(Path(cfg['plan']).read_text())['merge'] == bootstrap.MERGE
         assert json.loads(Path(cfg['signer_policy']).read_text())['authority_identity'] == (
@@ -295,6 +313,19 @@ def test_stages_from_real_local_git_without_runtime_or_credential_values(monkeyp
             Path(x).name for x in bootstrap.ARTIFACTS} | {'merged-byte-manifest.json'}
         with pytest.raises(FileExistsError):
             bootstrap.stage(cfg)
+
+
+def test_real_git_rejects_owner_mismatch_without_safe_directory():
+    # CI need not provide two UIDs; Git's test-only owner simulation exercises
+    # the real command's dubious-ownership guard without changing host ownership.
+    with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+        subprocess.run(['git', '-C', directory, 'init', '-q'], check=True, timeout=15)
+        env = {**os.environ, 'GIT_TEST_ASSUME_DIFFERENT_OWNER': '1',
+               'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'}
+        result = subprocess.run(['git', '-C', directory, 'status', '--porcelain'],
+            env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+        assert result.returncode == 128
+        assert b'dubious ownership' in result.stderr
 
 
 def test_image_mismatch_stops_before_staging_anything(monkeypatch):

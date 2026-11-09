@@ -397,9 +397,11 @@ def _stage_once(cfg):
     records = build_records(cfg, public)
     # No writes above this point. From here every created name is exclusive;
     # a failure preserves partial fresh state without rollback/retry.
+    # Root runs clone/checkout/config/status below. Keep runner root-owned until
+    # its last root Git command; Git's dubious-ownership guard stays enabled.
     for key in ('bundle','runner','state','auth','context','home','inbox','journal_parent','signer_state_root'):
-        _mkdir(paths[key], 0 if key in ('bundle','journal_parent','signer_state_root') else cfg['uid'],
-               0 if key in ('bundle','journal_parent','signer_state_root') else cfg['gid'])
+        _mkdir(paths[key], 0 if key in ('bundle','runner','journal_parent','signer_state_root') else cfg['uid'],
+               0 if key in ('bundle','runner','journal_parent','signer_state_root') else cfg['gid'])
     _mkdir(paths['state'] / 'queue', cfg['uid'], cfg['gid'])
     for name, blob in blobs.items():
         basename = Path(name).name
@@ -436,6 +438,7 @@ def _stage_once(cfg):
             command(['git', '-C', str(paths['runner']), 'status', '--porcelain=v1',
                      '--untracked-files=all']).strip()):
         raise ValueError('runner identity/cleanliness changed')
+    # No root Git operation may follow this worker-ownership transition.
     _chown_fresh_tree(paths['runner'], cfg['uid'], cfg['gid'])
     for target, name, owner, group in ((paths['auth'] / 'authorization.json','authorization.json', cfg['uid'], cfg['gid']),
             (paths['context'] / 'context.json','context.json', cfg['uid'], cfg['gid']),
