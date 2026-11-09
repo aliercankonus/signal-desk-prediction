@@ -26,12 +26,17 @@ def fixture():
         for folder in ('source.git', 'fresh', 'private', 'venv', 'excluded-agent', 'excluded-app', 'excluded-release'):
             (root / folder).mkdir(mode=0o700)
         (root / 'venv/pyvenv.cfg').write_text('home = /synthetic\n')
+        worker_uid = 12345 if os.geteuid() == 0 else os.geteuid()
+        worker_gid = 12345 if os.geteuid() == 0 else os.getegid()
+        if os.geteuid() == 0:
+            os.chown(root / 'venv', worker_uid, worker_gid)
+            os.chown(root / 'venv/pyvenv.cfg', worker_uid, worker_gid)
         for filename in ('key', 'public', 'token'):
             (root / 'private' / filename).write_bytes(b'synthetic fixture only')
             (root / 'private' / filename).chmod(0o600)
         values = dict(attempt='attempt-issue41', source=str(root/'source.git'), fresh_parent=str(root/'fresh'),
             private_parent=str(root/'private'), venv=str(root/'venv'), image='sha256:' + 'a'*64,
-            uid=max(1, os.geteuid()), gid=max(1, os.getegid()), signer_key=str(root/'private/key'),
+            uid=worker_uid, gid=worker_gid, signer_key=str(root/'private/key'),
             signer_public=str(root/'private/public'), signer_token=str(root/'private/token'),
             excluded_roots=[str(root/f'excluded-{name}') for name in ('agent','app','release')],
             requirements_sha256='b'*64, python_version='3.14.9', pytest_version='8.3.3',
