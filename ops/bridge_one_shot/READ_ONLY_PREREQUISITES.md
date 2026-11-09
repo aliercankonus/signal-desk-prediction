@@ -1,6 +1,6 @@
 # #41 first operator step: read-only prerequisite inventory
 
-**Review-only, NOT RUN ON VPS.** Copy the single Bash block in its entirety into an independently approved root terminal. It is byte-for-byte `read_only_prereqs.sh` at this commit. It needs no installed helper, private spec, credentials or network download. Optional nonsecret path prompts may be left blank. Do not paste private path answers or Docker metadata into GitHub. PRESENT means metadata only, never GO. Missing/unknown inputs report MISSING or UNPROVEN without changing host state; root/session failures remain NO-GO. The manager must review the exact merged bytes before instructing an operator to run them.
+**Review-only, NOT RUN ON VPS.** Copy the single Bash block in its entirety into an independently approved root terminal. It is byte-for-byte `read_only_prereqs.sh` at this commit. It needs no installed helper, private spec, credentials or network download. Optional nonsecret path or exact image/container identity prompts may be left blank. An absent one-shot project is normal; an available explicit image can still be checked independently. Do not paste private path answers or Docker metadata into GitHub. PRESENT means metadata only, never GO. Missing/unknown inputs report MISSING or UNPROVEN without changing host state; root/session failures remain NO-GO. The manager must review the exact merged bytes before instructing an operator to run them.
 
 ```bash
 # REVIEW-ONLY, standalone root-terminal block. No installed helper or spec required.
@@ -26,7 +26,8 @@ ENV = dict(PATH='/usr/sbin:/sbin:/usr/bin:/bin', HOME='/nonexistent', LC_ALL='C'
            GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
            GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never')
 GATES = ('source', 'source_objects', 'runner', 'venv', 'interpreter', 'image',
-         'container_mounts', 'private_parent', 'signer_key', 'signer_public',
+         'project_containers', 'candidate_container', 'container_mounts',
+         'private_parent', 'signer_key', 'signer_public',
          'root_readback', 'dependencies', 'image_internal_isolation',
          'manager_exclusive_invocation', 'persistent_worker', 'runtime_capability')
 
@@ -106,7 +107,7 @@ def bounded(argv, *, limit=4096, seconds=6):
                     if len(out) > limit:
                         raise ValueError('command output bound')
         if child.wait(timeout=max(.001, deadline - time.monotonic())):
-            raise ValueError('command failed')
+            raise LookupError('read-only command unavailable')
         return bytes(out)
     finally:
         selector.close()
@@ -117,6 +118,21 @@ def bounded(argv, *, limit=4096, seconds=6):
                 pass
             child.wait(timeout=2)
         child.stdout.close()
+
+
+def canonical_path(value):
+    return (isinstance(value, str) and 0 < len(value) <= 512 and value.startswith('/') and
+            not any(ord(ch) < 32 for ch in value) and
+            '..' not in pathlib.PurePosixPath(value).parts and
+            str(pathlib.PurePosixPath(value)) == value)
+
+
+def overlaps(left, right):
+    """Canonical lexical host-path overlap in BOTH directions; no symlink resolution."""
+    if not canonical_path(left) or not canonical_path(right):
+        raise ValueError('noncanonical mount or protected path')
+    a, b = pathlib.PurePosixPath(left), pathlib.PurePosixPath(right)
+    return a == b or a in b.parents or b in a.parents
 
 
 def inventory(inputs, run=bounded):
@@ -144,7 +160,7 @@ def inventory(inputs, run=bounded):
             # Commit identity only; do not load/execute a checkout or read private files.
             mark('source', 'PRESENT', 'trusted private bare store metadata')
             mark('source_objects', 'PRESENT', 'all four exact commit objects')
-        except (OSError, ValueError, TimeoutError, AssertionError):
+        except (OSError, ValueError, TimeoutError, AssertionError, LookupError):
             mark('source', 'MISSING', 'bare store or object identity check failed')
             mark('source_objects', 'MISSING', 'pin absent/mismatch/timeout')
     runner = inputs.get('runner', '')
@@ -182,36 +198,88 @@ def inventory(inputs, run=bounded):
         mark(gate, 'PRESENT' if value and trusted(value, private=True, file=True) else 'MISSING',
              'root-private file metadata only; contents/authority UNPROVEN' if value and trusted(value, private=True, file=True) else
              'NOT_CONFIGURED or absent/untrusted/symlinked root-private file')
+    candidate_image = inputs.get('image', '')
+    candidate_container = inputs.get('container', '')
+    ids = []
+    listed = False
     try:
         ids = run(['docker', 'ps', '-aq', '--no-trunc', '--filter', LABEL, '--format', '{{.ID}}']).decode('ascii').splitlines()
-        if len(ids) > 8 or any(not re.fullmatch('[0-9a-f]{64}', x) for x in ids):
-            raise ValueError('ambiguous project container inventory')
-        if len(ids) != 1:
-            mark('image', 'MISSING', 'no unique existing project container/image identity')
-            mark('container_mounts', 'UNPROVEN', 'no unique existing project container; mount exclusions unverified')
-        else:
-            # Whitelisted format: never request Config.Env, full inspect or output raw mount sources.
-            fmt = '{{.Image}}|{{.Config.User}}|{{json .Mounts}}|'
-            raw = run(['docker', 'container', 'inspect', '--format', fmt, ids[0]], limit=8192)
-            image, user, mounts, _ = raw.decode('utf-8').split('|', 3)
-            if not re.fullmatch('sha256:[0-9a-f]{64}', image) or not user or len(mounts) > 8192:
-                raise ValueError('image/user metadata invalid')
+        if len(ids) > 8 or len(set(ids)) != len(ids) or any(
+                not re.fullmatch('[0-9a-f]{64}', x) for x in ids):
+            raise ValueError('ambiguous bounded project inventory')
+        listed = True
+        mark('project_containers', 'PRESENT' if ids else 'UNPROVEN',
+             'bounded project IDs observed; not a persistent worker proof' if ids else
+             'no project containers observed; installation NOT_CONFIGURED')
+    except (OSError, ValueError, UnicodeError, TimeoutError, LookupError):
+        mark('project_containers', 'UNPROVEN', 'bounded Docker project list unavailable/invalid')
+        ids = []  # A failed list is not a claim of project absence.
+    inspect_ids = list(ids)
+    if candidate_container:
+        if not re.fullmatch('[0-9a-f]{64}', candidate_container):
+            mark('candidate_container', 'MISSING', 'invalid optional container ID')
+        elif candidate_container not in inspect_ids:
+            inspect_ids.append(candidate_container)
+    else:
+        mark('candidate_container', 'UNPROVEN', 'NOT_CONFIGURED: optional container ID')
+    observed_images = set()
+    protected = [x for x in (source, parent, inputs.get('signer_key', ''),
+                             inputs.get('signer_public', ''), inputs.get('root_readback', '')) if x]
+    mount_bad = False
+
+    fmt = '{{.Image}}|{{.Config.User}}|{{json .Mounts}}|'
+    for ident in inspect_ids:  # at most eight project IDs plus one explicit candidate
+        try:
+            raw = run(['docker', 'container', 'inspect', '--format', fmt, ident], limit=8192)
+            image, user, rest = raw.decode('utf-8').split('|', 2)
+            mounts, delimiter, tail = rest.rpartition('|')
+            if (not delimiter or tail.strip() or not re.fullmatch('sha256:[0-9a-f]{64}', image) or
+                    not user or len(mounts) > 8192):
+                raise ValueError('container identity/metadata invalid')
             data = json.loads(mounts)
-            if not isinstance(data, list) or len(data) > 32 or any(not isinstance(x, dict) or
-                    not {'Source', 'Destination', 'Type'} <= set(x) for x in data):
+            if not isinstance(data, list) or len(data) > 32 or any(
+                    not isinstance(m, dict) or not {'Source', 'Destination', 'Type'} <= set(m) or
+                    m['Type'] not in ('bind', 'volume', 'tmpfs') or
+                    not canonical_path(m['Destination']) or
+                    (m['Type'] == 'tmpfs' and m['Source'] not in ('', 'tmpfs')) or
+                    (m['Type'] != 'tmpfs' and not canonical_path(m['Source'])) for m in data):
                 raise ValueError('mount metadata invalid')
-            observed = run(['docker', 'image', 'inspect', '--format', '{{.Id}}', image]).decode().strip()
-            mark('image', 'PRESENT' if observed == image else 'MISSING',
-                 'immutable image ID matches inspect' if observed == image else 'image ID mismatch')
-            protected = [x for x in (source, inputs.get('private_parent', '')) if x]
-            overlap = any(m.get('Type') == 'bind' and any(
-                m.get('Source') == p or str(m.get('Source', '')).startswith(p.rstrip('/') + '/')
-                for p in protected) for m in data)
-            mark('container_mounts', 'MISSING' if overlap else 'UNPROVEN',
-                 'protected source/parent overlap' if overlap else 'mount exclusion needs actual host review')
-    except (OSError, ValueError, UnicodeError, TimeoutError, AssertionError):
-        mark('image', 'MISSING', 'Docker inventory unavailable/invalid/timeout')
-        mark('container_mounts', 'UNPROVEN', 'Docker mounts not independently inspected')
+            observed_images.add(image)
+            if any(m['Type'] != 'tmpfs' and overlaps(m['Source'], p)
+                   for m in data for p in protected):
+                mount_bad = True
+            if ident == candidate_container:
+                mark('candidate_container', 'PRESENT', 'explicit container metadata only; project membership unverified')
+        except (ValueError, UnicodeError):
+            mount_bad = True  # Malformed source/identity is not a clean exclusion.
+            if ident == candidate_container:
+                mark('candidate_container', 'MISSING', 'optional container metadata invalid')
+        except (OSError, TimeoutError, AssertionError, LookupError):
+            if ident == candidate_container:
+                mark('candidate_container', 'UNPROVEN', 'optional container inspection unavailable')
+    mark('container_mounts', 'MISSING' if mount_bad else 'UNPROVEN',
+         'overlap or malformed mount metadata' if mount_bad else
+         'bounded mounts only; uninspected containers/global exclusion UNPROVEN')
+    if candidate_image and not re.fullmatch('sha256:[0-9a-f]{64}', candidate_image):
+        mark('image', 'MISSING', 'invalid optional immutable image ID')
+    elif candidate_image and observed_images and any(x != candidate_image for x in observed_images):
+        mark('image', 'MISSING', 'candidate differs from observed container image')
+    elif len(observed_images) > 1:
+        mark('image', 'MISSING', 'bounded project containers report differing images')
+    else:
+        selected = candidate_image or next(iter(observed_images), '')
+        if not selected:
+            mark('image', 'UNPROVEN', 'NOT_CONFIGURED: image ID; no observed container image')
+        else:
+            try:
+                observed = run(['docker', 'image', 'inspect', '--format', '{{.Id}}', selected]).decode('ascii').strip()
+                mark('image', 'PRESENT' if observed == selected else 'MISSING',
+                     'immutable image ID matches metadata; contents UNPROVEN' if observed == selected else
+                     'candidate/observed image identity mismatch')
+            except (OSError, ValueError, UnicodeError, TimeoutError, AssertionError, LookupError):
+                mark('image', 'MISSING' if candidate_image and listed else 'UNPROVEN',
+                     'candidate image unavailable/mismatch' if candidate_image and listed else
+                     'image availability unverified')
     return report, missing
 
 
@@ -222,6 +290,8 @@ def main():
     labels = {'source':'Optional existing protected bare store path',
               'runner':'Optional existing runner root path',
               'venv':'Optional inspected venv host path (blank checks one reported candidate)',
+              'image':'Optional immutable candidate Docker image ID sha256:...',
+              'container':'Optional exact candidate container ID (64 hex)',
               'private_parent':'Optional existing root-private setup parent',
               'signer_key':'Optional existing root-only signing key path (metadata only)',
               'signer_public':'Optional existing root-only public verifier path (metadata only)',

@@ -174,3 +174,163 @@ def test_subprocess_output_and_deadline_are_bounded(monkeypatch):
     with pytest.raises(TimeoutError, match='timeout'):
         module['bounded'](argv, seconds=.01)
     os.close(writers[-1])
+
+
+def offline_docker(monkeypatch, module, project_ids=(), image=None, mounts=None,
+                   candidate_id=None, inspected_image=None, image_missing=False):
+    """Exercise the real command allowlist and parser; fake only Popen."""
+    cid = candidate_id or ('a' * 64)
+    image = image or ('sha256:' + 'b' * 64)
+    seen = []
+    class Child:
+        def __init__(self, payload):
+            readable, writable = os.pipe()
+            os.write(writable, payload)
+            os.close(writable)
+            self.stdout = os.fdopen(readable, 'rb', buffering=0)
+            self.pid = 76543
+        def poll(self):
+            return 0
+        def wait(self, timeout=None):
+            return 0
+    def fake_popen(argv, **kwargs):
+        seen.append(argv)
+        assert kwargs['stderr'] is subprocess.DEVNULL
+        assert kwargs['env']['GIT_CONFIG_GLOBAL'] == '/dev/null'
+        if argv[:2] == ['/usr/bin/docker', 'ps']:
+            return Child(('\n'.join(project_ids) + ('\n' if project_ids else '')).encode())
+        if argv[:3] == ['/usr/bin/docker', 'container', 'inspect']:
+            assert argv[-1] in set(project_ids) | {cid}
+            data = mounts if mounts is not None else [
+                {'Type':'bind', 'Source':'/unrelated', 'Destination':'/state'}]
+            return Child((image + '|1001:1001|' + __import__('json').dumps(data) + '|').encode())
+        if argv[:3] == ['/usr/bin/docker', 'image', 'inspect']:
+            if image_missing:
+                raise LookupError('image not found')
+            return Child(((inspected_image if inspected_image is not None else image) + '\n').encode())
+        raise AssertionError('unexpected or effectful command: ' + str(argv[:3]))
+    monkeypatch.setattr(module['subprocess'], 'Popen', fake_popen)
+    return seen, cid, image
+
+
+def test_absent_project_with_available_explicit_candidate_image(monkeypatch):
+    _, module = source_and_module()
+    image = 'sha256:' + 'b' * 64
+    seen, _, _ = offline_docker(monkeypatch, module)
+    report, missing = module['inventory']({'image':image}, run=module['bounded'])
+    assert report['image'][0] == 'PRESENT'
+    assert report['container_mounts'][0] == 'UNPROVEN'
+    assert 'image' not in missing
+    assert any(row[:3] == ['/usr/bin/docker','image','inspect'] for row in seen)
+
+
+def test_normal_two_container_project_inspects_both_without_explicit_image(monkeypatch):
+    _, module = source_and_module()
+    ids = ('a'*64, 'c'*64)
+    seen, _, _ = offline_docker(monkeypatch, module, project_ids=ids)
+    report, missing = module['inventory']({}, run=module['bounded'])
+    assert report['image'][0] == 'PRESENT'
+    assert report['container_mounts'][0] == 'UNPROVEN'  # not global isolation
+    assert 'image' not in missing
+    assert {row[-1] for row in seen if row[:3] == ['/usr/bin/docker','container','inspect']} == set(ids)
+
+
+def test_optional_container_identity_without_project_is_only_candidate(monkeypatch):
+    _, module = source_and_module()
+    seen, cid, _ = offline_docker(monkeypatch, module)
+    report, _ = module['inventory']({'container':cid}, run=module['bounded'])
+    assert report['image'][0] == 'PRESENT'
+    assert report['container_mounts'][0] == 'UNPROVEN'
+    assert any(row[-1] == cid for row in seen)
+
+
+def test_unknown_image_candidate_is_unproven_but_bad_observed_image_missing(monkeypatch):
+    _, module = source_and_module()
+    offline_docker(monkeypatch, module)
+    report, _ = module['inventory']({}, run=module['bounded'])
+    assert report['image'][0] == 'UNPROVEN'
+    offline_docker(monkeypatch, module, inspected_image='sha256:' + 'f'*64)
+    report, _ = module['inventory']({'image':'sha256:' + 'b'*64}, run=module['bounded'])
+    assert report['image'][0] == 'MISSING'
+    offline_docker(monkeypatch, module, image_missing=True)
+    report, _ = module['inventory']({'image':'sha256:' + 'b'*64}, run=module['bounded'])
+    assert report['image'][0] == 'MISSING'
+
+
+def test_unavailable_explicit_container_does_not_imply_absent_image(monkeypatch):
+    _, module = source_and_module()
+    cid = 'd'*64
+    def fake_popen(argv, **kwargs):
+        if argv[:3] == ['/usr/bin/docker', 'container', 'inspect']:
+            raise LookupError('candidate not found')
+        return original(argv, **kwargs)
+    offline_docker(monkeypatch, module)
+    original = module['subprocess'].Popen
+    monkeypatch.setattr(module['subprocess'], 'Popen', fake_popen)
+    report, _ = module['inventory']({'container':cid}, run=module['bounded'])
+    assert report['candidate_container'][0] == 'UNPROVEN'
+    assert report['container_mounts'][0] == 'UNPROVEN'
+    assert report['image'][0] == 'UNPROVEN'
+
+
+def test_one_uninspected_project_container_never_proves_exclusion(monkeypatch):
+    _, module = source_and_module()
+    ids = ('a'*64, 'c'*64)
+    offline_docker(monkeypatch, module, project_ids=ids)
+    original = module['subprocess'].Popen
+    def partial(argv, **kwargs):
+        if argv[:3] == ['/usr/bin/docker', 'container', 'inspect'] and argv[-1] == ids[1]:
+            raise LookupError('second project container not inspected')
+        return original(argv, **kwargs)
+    monkeypatch.setattr(module['subprocess'], 'Popen', partial)
+    report, _ = module['inventory']({}, run=module['bounded'])
+    assert report['container_mounts'][0] == 'UNPROVEN'
+    assert report['project_containers'][0] == 'PRESENT'
+
+
+@pytest.mark.parametrize(('mount_source', 'expected'), [
+    ('/protected/bare', 'MISSING'),
+    ('/protected/bare/child', 'MISSING'),
+    ('/protected', 'MISSING'),
+    ('/', 'MISSING'),
+    ('/protected/bare-sibling', 'UNPROVEN'),
+    ('/protected/../protected/bare', 'MISSING'),
+    ('relative/mount', 'MISSING'),
+])
+def test_bind_mount_overlap_both_ancestry_directions_and_malformed_metadata(
+        monkeypatch, mount_source, expected):
+    _, module = source_and_module()
+    original = module['trusted']
+    module['trusted'] = lambda path, **kw: True if path == '/protected/bare' else original(path, **kw)
+    mounts = [{'Type':'bind','Source':mount_source,'Destination':'/state'}]
+    offline_docker(monkeypatch, module, project_ids=('a'*64,), mounts=mounts)
+    report, _ = module['inventory']({'source':'/protected/bare'}, run=module['bounded'])
+    assert report['container_mounts'][0] == expected
+
+
+def test_optional_root_signer_file_exposed_by_parent_bind_is_rejected(monkeypatch):
+    _, module = source_and_module()
+    mounts = [{'Type':'bind','Source':'/root-only','Destination':'/private'}]
+    offline_docker(monkeypatch, module, project_ids=('a'*64,), mounts=mounts)
+    report, _ = module['inventory']({'signer_key':'/root-only/key.pem'}, run=module['bounded'])
+    assert report['container_mounts'][0] == 'MISSING'
+
+
+def test_volume_mount_source_exposing_protected_parent_is_not_exempt(monkeypatch):
+    _, module = source_and_module()
+    original = module['trusted']
+    module['trusted'] = lambda path, **kw: True if path == '/protected/bare' else original(path, **kw)
+    mounts = [{'Type':'volume','Source':'/protected','Destination':'/state'}]
+    offline_docker(monkeypatch, module, project_ids=('a'*64,), mounts=mounts)
+    report, _ = module['inventory']({'source':'/protected/bare'}, run=module['bounded'])
+    assert report['container_mounts'][0] == 'MISSING'
+
+
+def test_normal_tmpfs_has_no_host_source_to_compare(monkeypatch):
+    _, module = source_and_module()
+    mounts = [{'Type':'tmpfs','Source':'','Destination':'/tmp'},
+              {'Type':'bind','Source':'/unrelated','Destination':'/state'}]
+    offline_docker(monkeypatch, module, project_ids=('a'*64,'c'*64), mounts=mounts)
+    report, _ = module['inventory']({}, run=module['bounded'])
+    assert report['container_mounts'][0] == 'UNPROVEN'
+    assert report['image'][0] == 'PRESENT'
