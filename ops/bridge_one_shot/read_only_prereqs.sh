@@ -6,7 +6,7 @@ umask 077
 PATH=/usr/sbin:/sbin:/usr/bin:/bin
 export PATH
 unset BASH_ENV ENV PYTHONPATH PYTHONHOME
-/usr/bin/env -i PATH="$PATH" HOME=/nonexistent LC_ALL=C /usr/bin/python3 -I -B - <<'PY'
+/usr/bin/env -i PATH="$PATH" HOME=/nonexistent LC_ALL=C SD_INVENTORY_CANDIDATES="${SD_INVENTORY_CANDIDATES-}" /usr/bin/python3 -I -B - <<'PY'
 import json, os, pathlib, re, selectors, signal, stat, subprocess, time
 
 MERGE = '1899a7e3023a2c30e9356414bc85a077804b5d0f'
@@ -14,8 +14,9 @@ BOOTSTRAP = '665698113fcd7d8f7d10a75ee42f67d8a2131166'
 ADAPTER = 'eac843de7967d48cce56ee9a198750e98754a2de'
 RUNNER = 'e84021a786004456a12de9e25eae50d191da6cf1'
 REQUIREMENTS = '58f90369318da1e7ab651447080f06bb80c361a4a0109d79eca4762aba8bf97d'
-# Previously reported development interpreter path: candidate, NOT a host assertion.
-VENV_CANDIDATE = '/opt/data/signal-desk-tooling/venvs/issue26-recovery-python314-20261030'
+# Paths are host paths only. Never try a container path as a host default.
+INPUT_KEYS = ('source', 'runner', 'venv', 'image', 'container', 'private_parent',
+              'signer_key', 'signer_public', 'root_readback')
 LABEL = 'label=com.docker.compose.project=signal-desk-bridge-once'
 ENV = dict(PATH='/usr/sbin:/sbin:/usr/bin:/bin', HOME='/nonexistent', LC_ALL='C',
            GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
@@ -122,6 +123,36 @@ def canonical_path(value):
             str(pathlib.PurePosixPath(value)) == value)
 
 
+def candidate_inputs(raw):
+    """Metadata supplied privately by the operator/manager, never task authority."""
+    if not isinstance(raw, str) or len(raw) > 8192:
+        raise ValueError('invalid candidate input')
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate candidate input')
+            result[key] = value
+        return result
+    data = json.loads(raw, object_pairs_hook=unique)
+    if not isinstance(data, dict) or set(data) - set(INPUT_KEYS):
+        raise ValueError('unsupported candidate input')
+    for key, value in data.items():
+        if not isinstance(value, str) or len(value) > 512:
+            raise ValueError('invalid candidate metadata')
+        if not value:
+            continue
+        if key == 'image':
+            valid = re.fullmatch('sha256:[0-9a-f]{64}', value)
+        elif key == 'container':
+            valid = re.fullmatch('[0-9a-f]{64}', value)
+        else:
+            valid = canonical_path(value) and value != '/'
+        if not valid:
+            raise ValueError('invalid candidate metadata')
+    return data
+
+
 def overlaps(left, right):
     """Canonical lexical host-path overlap in BOTH directions; no symlink resolution."""
     if not canonical_path(left) or not canonical_path(right):
@@ -139,8 +170,8 @@ def inventory(inputs, run=bounded):
             missing.append(name)
     source = inputs.get('source', '')
     if not source:
-        mark('source', 'MISSING', 'NOT_CONFIGURED: protected bare store path')
-        mark('source_objects', 'MISSING', 'requires protected source')
+        mark('source', 'NOT_CONFIGURED', 'protected bare store path not supplied; absence not established')
+        mark('source_objects', 'UNPROVEN', 'requires configured protected source')
     elif not trusted(source, private=True):
         mark('source', 'MISSING', 'absent/untrusted/symlinked source')
         mark('source_objects', 'MISSING', 'source unavailable')
@@ -160,13 +191,16 @@ def inventory(inputs, run=bounded):
             mark('source_objects', 'MISSING', 'pin absent/mismatch/timeout')
     runner = inputs.get('runner', '')
     if not runner:
-        mark('runner', 'MISSING', 'NOT_CONFIGURED: runner candidate path')
+        mark('runner', 'NOT_CONFIGURED', 'runner host path not supplied; absence not established')
     elif not trusted(runner):
         mark('runner', 'MISSING', 'absent/untrusted/symlinked runner root')
     else:
         mark('runner', 'UNPROVEN', 'trusted directory only; HEAD/cleanliness and UID unverified')
-    venv = inputs.get('venv', '') or VENV_CANDIDATE
-    if not trusted(venv, worker=True):
+    venv = inputs.get('venv', '')
+    if not venv:
+        mark('venv', 'NOT_CONFIGURED', 'host venv path not supplied; no container-path fallback')
+        mark('interpreter', 'UNPROVEN', 'host venv not configured; nothing executed')
+    elif not trusted(venv, worker=True):
         mark('venv', 'MISSING', 'candidate absent/untrusted/symlinked; verify host venv source')
         mark('interpreter', 'MISSING', 'candidate venv unavailable')
     else:
@@ -179,18 +213,18 @@ def inventory(inputs, run=bounded):
                 mark('venv', 'PRESENT', 'candidate venv metadata only; worker ownership UNPROVEN')
             else:
                 mark('venv', 'MISSING', 'venv config type/size mismatch')
-            mark('interpreter', 'UNPROVEN' if stat.S_ISREG(bi.st_mode) else 'MISSING',
+            mark('interpreter', 'UNPROVEN' if stat.S_ISREG(bi.st_mode) or stat.S_ISLNK(bi.st_mode) else 'MISSING',
                  'candidate interpreter metadata only; not executed')
         except OSError:
             mark('venv', 'MISSING', 'venv metadata unavailable')
             mark('interpreter', 'MISSING', 'interpreter metadata unavailable')
     parent = inputs.get('private_parent', '')
-    mark('private_parent', 'PRESENT' if parent and trusted(parent, private=True) else 'MISSING',
+    mark('private_parent', 'NOT_CONFIGURED' if not parent else 'PRESENT' if trusted(parent, private=True) else 'MISSING',
          'trusted root-private parent metadata' if parent and trusted(parent, private=True) else
          'NOT_CONFIGURED or absent/untrusted/symlinked private parent')
     for gate in ('signer_key', 'signer_public', 'root_readback'):
         value = inputs.get(gate, '')
-        mark(gate, 'PRESENT' if value and trusted(value, private=True, file=True) else 'MISSING',
+        mark(gate, 'NOT_CONFIGURED' if not value else 'PRESENT' if trusted(value, private=True, file=True) else 'MISSING',
              'root-private file metadata only; contents/authority UNPROVEN' if value and trusted(value, private=True, file=True) else
              'NOT_CONFIGURED or absent/untrusted/symlinked root-private file')
     candidate_image = inputs.get('image', '')
@@ -284,20 +318,24 @@ def main():
         return
     labels = {'source':'Optional existing protected bare store path',
               'runner':'Optional existing runner root path',
-              'venv':'Optional inspected venv host path (blank checks one reported candidate)',
+              'venv':'Optional inspected venv HOST path (not a container path)',
               'image':'Optional immutable candidate Docker image ID sha256:...',
               'container':'Optional exact candidate container ID (64 hex)',
               'private_parent':'Optional existing root-private setup parent',
               'signer_key':'Optional existing root-only signing key path (metadata only)',
               'signer_public':'Optional existing root-only public verifier path (metadata only)',
               'root_readback':'Optional existing root-only readback file path (metadata only)'}
-    values = {key: ask(label) for key, label in labels.items()}
     try:
+        raw = os.environ.get('SD_INVENTORY_CANDIDATES', '')
+        values = candidate_inputs(raw) if raw else {key: ask(label) for key, label in labels.items()}
+        print('INPUT_MODE: ' + ('PRIVATE_CANDIDATES' if raw else 'INTERACTIVE') + ' — metadata only; not authority')
         report, missing = inventory(values)
         for name in GATES:
             status, reason = report[name]
             print(name.upper() + ': ' + status + ' — ' + reason)
         print('MISSING_PREREQUISITES: ' + (', '.join(missing) if missing else 'none in metadata only; independent proof still required'))
+        unconfigured = [name for name in GATES if report[name][0] == 'NOT_CONFIGURED']
+        print('UNCONFIGURED_INPUTS: ' + (', '.join(unconfigured) if unconfigured else 'none'))
         print('OVERALL: NO-GO — file presence is not authority, isolation or runtime capability')
     except Exception:
         # Do not reveal exception text: it may contain a private host path.
