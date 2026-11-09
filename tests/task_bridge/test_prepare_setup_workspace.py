@@ -1,4 +1,4 @@
-"""Public helper preparation using real pinned Git blobs; only Docker is fake."""
+"""Real Git reads of frozen public bytes; ref lookup and Docker are offline fixtures."""
 import hashlib
 import ast
 import importlib.util
@@ -34,7 +34,28 @@ def fixture(monkeypatch):
     with tempfile.TemporaryDirectory(dir=Path.home()) as folder:
         root = Path(folder)
         source, parent = root / 'source.git', root / 'new-setup'
-        subprocess.run(['git', 'clone', '--bare', '--no-hardlinks', str(ROOT), str(source)],
+        # The collector deliberately excludes .git. Build synthetic Git history
+        # containing the exact reviewed bytes, with hash gates unchanged. Only
+        # fixed historical ref lookup is mapped below, never production policy.
+        repo = root / 'fixture-repo'
+        repo.mkdir(mode=0o700)
+        for name in (*module.FILES, 'operator_bootstrap.py'):
+            original = ROOT / 'ops/bridge_one_shot' / name
+            target = repo / 'ops/bridge_one_shot' / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(original.read_bytes())
+        for name, digest in module.FILES.items():
+            assert hashlib.sha256((repo / 'ops/bridge_one_shot' / name).read_bytes()).hexdigest() == digest
+        boot = (repo / 'ops/bridge_one_shot/operator_bootstrap.py').read_bytes()
+        assert len(boot) == 26012
+        assert hashlib.sha256(boot).hexdigest() == 'e79f337fcbefc4f21f4d6d4abd2e30078227cb0913f242b552630fd110c1dd0d'
+        for args in (('init','-q'), ('config','user.name','Offline test'),
+                     ('config','user.email','test@example.invalid'), ('add','.'),
+                     ('commit','-qm','frozen public fixture')):
+            subprocess.run(['git','-C',str(repo),*args], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fixture_commit = subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD']).decode().strip()
+        subprocess.run(['git', 'clone', '--bare', '--no-hardlinks', str(repo), str(source)],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         source.chmod(0o700)
         legacy = root / 'old-runner'
@@ -60,6 +81,9 @@ def fixture(monkeypatch):
                 assert argv[0] in ('/usr/bin/git', 'git')
                 assert any(value.startswith('--git-dir=') for value in argv)
                 assert not any(value in argv for value in ('fetch','checkout','reset','clean','push'))
+                assert argv[-1].split(':', 1)[0] in (
+                    module.PUBLIC_PIN, '665698113fcd7d8f7d10a75ee42f67d8a2131166')
+                argv = [*argv[:-1], fixture_commit + ':' + argv[-1].split(':', 1)[1]]
             return real_popen(argv, **kwargs)
         monkeypatch.setattr(subprocess, 'Popen', transport)
         yield module, source, parent, legacy, seen, metadata
