@@ -75,7 +75,7 @@ def fixture(monkeypatch):
                     assert argv[:6] == ['docker','inspect','--type','container','--format','{{json .Mounts}}']
                     assert argv[-1] in metadata['ids']
                     payload = json.dumps(metadata['mounts'])
-                argv = ['/usr/bin/python3', '-I', '-B', '-c',
+                argv = [sys.executable, '-I', '-B', '-c',
                         'import sys;sys.stdout.write(' + repr(payload) + ')']
             else:
                 assert argv[0] in ('/usr/bin/git', 'git')
