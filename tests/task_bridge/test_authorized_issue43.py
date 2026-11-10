@@ -278,3 +278,19 @@ def test_exact_feed_with_actual_inbox_persists_claim_before_one_executor_and_nev
         assert box.tick()['status']=='blocked' and calls==['executor']
         box.disable();assert not box.doctor()['enabled']
         assert box.doctor()['claim']['instruction_id']==m.INSTRUCTION_ID
+
+
+def test_operator_block_is_parseable_and_binds_both_immutable_reviewed_files():
+    import ast,hashlib,re,subprocess
+    text=(ROOT/'ops/bridge_one_shot/RUN_AUTHORIZED_ISSUE43.md').read_text()
+    block=re.findall(r'```bash\n(.*?)```',text,re.S)[0]
+    assert not any(re.match(r'^\s*\d+\s*[:|]',line) for line in block.splitlines())
+    subprocess.run(['bash','-n'],input=block.encode(),check=True)
+    code=block.split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
+    tree=ast.parse(code)
+    entries=ast.literal_eval(next(n.value for n in tree.body if isinstance(n,ast.Assign) and
+        any(isinstance(t,ast.Name) and t.id=='entries' for t in n.targets)))
+    assert entries[0][0]=='09aa854e8e1751f62286c0c1fc686a634d299729'
+    assert entries[1][0]=='5d1a005ae3a3a5816fd94ae085d6d81797e4cdf6'
+    for _,path,digest in entries:assert hashlib.sha256((ROOT/path).read_bytes()).hexdigest()==digest
+    assert '--execute-approved-issue43' in code and '--authenticate' not in code
