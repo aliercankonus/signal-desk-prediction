@@ -212,3 +212,15 @@ def test_actual_protected_blob_refuses_symlink_overwrite_or_owner_change():
         with pytest.raises(m.Stop):m.blob(link)
         os.chown(f,10000,10000)
         with pytest.raises(m.Stop):m.blob(f)
+
+
+def test_proposed_loader_has_verified_digest_syntax_and_live_tty_reconnection():
+    import hashlib, subprocess
+    text=(ROOT/'ops/bridge_one_shot/AUTHENTICATE_WORKER_ONCE.md').read_text()
+    block=text.split('```bash\n')[1].split('```')[0]
+    assert subprocess.run(['bash','-n'],input=block.encode(),capture_output=True).returncode==0
+    code=block.split("<<'PYCODE'\n")[1].rsplit('\nPYCODE',1)[0]
+    compile(code,'<proposed-auth-loader>','exec')
+    assert "digest = '"+hashlib.sha256((ROOT/'ops/bridge_one_shot/authenticate_worker_once.py').read_bytes()).hexdigest()+"'" in code
+    assert code.index('hashlib.sha256')<code.index("os.open('/dev/tty'")<code.index("namespace['main']()")
+    assert 'os.dup2(tty, 0)' in code
