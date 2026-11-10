@@ -182,3 +182,40 @@ def test_corrected_entry_has_parseable_hash_bound_tty_loader():
     compile(code,'<corrected-loader>','exec')
     digest=hashlib.sha256((ROOT/'ops/bridge_one_shot/authenticate_worker_clone_fix.py').read_bytes()).hexdigest()
     assert "digest = '"+digest+"'" in code and 'os.dup2(tty, 0)' in code
+
+
+def test_main_preserves_consumed_first_journal_and_selects_exclusive_second(monkeypatch,capsys):
+    lifecycle=m.protected_module('_entry_core_fixture',ROOT/'ops/bridge_one_shot/operator_lifecycle.py')
+    with tempfile.TemporaryDirectory(dir=Path.home()) as d:
+        parent=Path(d);parent.chmod(0o700);old=parent/(m.ATTEMPT+'-auth-only-01');old.mkdir(mode=0o700)
+        marker=old/'phase.json';marker.write_bytes(b'PRESERVE_ORIGINAL_JOURNAL\n');marker.chmod(0o600)
+        original=marker.read_bytes();p=SimpleNamespace(journal_parent=parent,attempt=m.ATTEMPT)
+        host=SimpleNamespace(Journal=lifecycle.Journal,CommandRunner=lambda **kw:None,
+                             HostOperations=lambda *a,**kw:None)
+        monkeypatch.setattr(m,'load',lambda workspace:(host,p))
+        monkeypatch.setattr(sys,'argv',['entry','--workspace',str(parent),'--authenticate'])
+        monkeypatch.setattr(sys,'stdin',SimpleNamespace(isatty=lambda:True))
+        def no_runtime(journal,*a,**kw):
+            journal.create()
+            journal.record('cleanup',intent=None,owned=(),cleanup=True,status='blocked')
+            return dict(github_readonly_verified=False,device_cli_success=False,cleanup_verified=True,
+                        failure=None,failure_phase=None,worker_preflight_code=None)
+        monkeypatch.setattr(m,'run',no_runtime)
+        assert m.main()==2
+        new=parent/m.CORRECTED_JOURNAL
+        assert new.is_dir() and marker.read_bytes()==original
+        snapshot=(new/'phase.json').read_bytes()
+        assert m.main()==1
+        assert (new/'phase.json').read_bytes()==snapshot and marker.read_bytes()==original
+        output=capsys.readouterr().out
+        assert 'TYPE=FileExistsError' in output and str(parent) not in output
+
+
+def test_main_generic_error_reports_only_public_category_site(monkeypatch,capsys):
+    monkeypatch.setattr(sys,'argv',['entry','--workspace','/unused/private/path'])
+    def failed(*a):raise ValueError('PRIVATE_SECRET_VALUE_NEVER_PRINT')
+    monkeypatch.setattr(m,'load',failed)
+    assert m.main()==1
+    output=capsys.readouterr().out
+    assert 'TYPE=ValueError' in output and 'SITE=' in output
+    assert 'PRIVATE_SECRET_VALUE' not in output and '/unused/private/path' not in output
