@@ -68,8 +68,15 @@ def fixture(monkeypatch):
         def transport(argv, **kwargs):
             seen.append(tuple(argv))
             if argv[0] == 'docker':
-                assert not any('Env' in value or 'exec' == value or 'run' == value for value in argv)
-                if argv == ['docker', 'ps', '-aq', '--no-trunc']:
+                assert not any(value in ('{{json .Config.Env}}', 'exec', 'run') for value in argv)
+                if argv[:3] == ['docker','image','inspect']:
+                    assert argv[3] == '--format' and argv[-1] == metadata.get('image')
+                    if argv[4] == '{{.Id}}':
+                        payload = metadata['image'] + '\n'
+                    else:
+                        assert argv[4] == '{{range .Config.Env}}{{println (index (split . "=") 0)}}{{end}}'
+                        payload = metadata.get('env_names', 'PATH\nHERMES_HOME\n')
+                elif argv == ['docker', 'ps', '-aq', '--no-trunc']:
                     payload = '\n'.join(metadata['ids']) + '\n'
                 else:
                     assert argv[:6] == ['docker','inspect','--type','container','--format','{{json .Mounts}}']
