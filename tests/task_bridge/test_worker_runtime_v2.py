@@ -204,3 +204,13 @@ def test_actual_worker_git_owner_gate_and_credential_protocol_without_gh():
         token.chmod(0o600)
         refused=run([sys.executable,'-I','-B',str(driver),'get'],request)
         assert refused.returncode==1 and not refused.stdout and TOKEN not in refused.stderr
+
+
+def test_canonical_preparation_loader_is_parseable_and_digest_bound():
+    text=(ROOT/'ops/bridge_one_shot/PREPARE_WORKER_RUNTIME_V2.md').read_text()
+    block=text.split('```bash\n')[1].split('```')[0]
+    assert subprocess.run(['bash','-n'],input=block.encode(),capture_output=True).returncode==0
+    code=block.split("<<'PYCODE'\n")[1].rsplit('\nPYCODE',1)[0]
+    compile(code,'<v2-loader>','exec')
+    digest=hashlib.sha256((ROOT/'ops/bridge_one_shot/prepare_worker_runtime_v2.py').read_bytes()).hexdigest()
+    assert "digest = '"+digest+"'" in code
