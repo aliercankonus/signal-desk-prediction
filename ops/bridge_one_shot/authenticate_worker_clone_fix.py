@@ -370,7 +370,7 @@ def main():
             print('AUTH_ONLY: REVIEWED_FILES_ONLY; no host runtime or credential action');return 0
         if not sys.stdin.isatty():raise Stop('LIVE_OPERATOR_TTY_REQUIRED')
         deadline=time.monotonic()+1200
-        journal=host.Journal(plan.journal_parent/(ATTEMPT+'-auth-only-01'),plan.attempt)
+        journal=host.Journal(plan.journal_parent/CORRECTED_JOURNAL,plan.attempt)
         ops=host.HostOperations(plan,runner=host.CommandRunner(deadline=deadline),deadline=deadline)
         result=run(journal,ops,host,deadline=deadline)
         print('GITHUB_READONLY: '+('VERIFIED_WORKER_NAMESPACE' if result['github_readonly_verified'] else 'UNVERIFIED'))
@@ -383,8 +383,19 @@ def main():
         print('OVERALL: NO-GO — authentication is not model entitlement, task authority or installed loop')
         return 0 if result['github_readonly_verified'] and result['device_cli_success'] and result['cleanup_verified'] else 2
     except (Exception,KeyboardInterrupt) as exc:
-        code=str(exc) if isinstance(exc,Stop) else 'PRESERVE_STATE'
-        print('STOP: AUTH_ONLY '+code+'; preserve files/resources; no retry or guessed cleanup');return 1
+        code=str(exc) if isinstance(exc,Stop) and re.fullmatch('[A-Z0-9_]{1,80}',str(exc)) else 'PRESERVE_STATE'
+        category=type(exc).__name__
+        if category not in ('Stop','FileExistsError','FileNotFoundError','PermissionError','ValueError','TypeError',
+                            'KeyError','AttributeError','JSONDecodeError','OSError','RuntimeError','TimeoutError','KeyboardInterrupt'):
+            category='OTHER'
+        site='UNKNOWN';tb=exc.__traceback__
+        public={'authenticate_worker_clone_fix.py','operator_host_v2.py','operator_lifecycle.py','root_signer.py'}
+        while tb:
+            frame=tb.tb_frame.f_code
+            if (Path(frame.co_filename).name in public or frame.co_filename.startswith('<reviewed-')) and re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,63}',frame.co_name):
+                site=frame.co_name+':'+str(tb.tb_lineno)
+            tb=tb.tb_next
+        print('STOP: AUTH_ONLY '+code+' TYPE='+category+' SITE='+site+'; preserve files/resources; no retry or guessed cleanup');return 1
     finally:signal.signal(signal.SIGTERM,previous)
 
 
