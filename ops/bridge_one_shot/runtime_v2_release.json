@@ -1,0 +1,20 @@
+{
+  "files": {
+    "ops/bridge_one_shot/bridge_readback.py": "47c90fd8dc1f77c8d0d942fe499764b145d10dcc74e51271aac713f4143dbb6c",
+    "ops/bridge_one_shot/compose.operator.v2.yml": "f8b710df1ac286b09ff28364dce8327db0b5c6d14ae2a153ac354daa8af36460",
+    "ops/bridge_one_shot/connect_proxy.py": "ccf1d660fba5a4758608b34611f395e5460e148c3e1f67edaa25529b5c78d619",
+    "ops/bridge_one_shot/network_preflight.py": "fb3520f6de9c66c6bbcb743fd600ba589d3b0126d7b10ba26ec93137cc393402",
+    "ops/bridge_one_shot/network_resources.py": "52b1c192ef6a366b0ec16e0ffa0c07697274d39b1a98e581cb796e99165f7b1d",
+    "ops/bridge_one_shot/operator_artifacts_v2.json": "4dcfbef0f2caef80bfc1430ef187f3d6fd88858ba682832a11d913aeb67e41b3",
+    "ops/bridge_one_shot/operator_host_v2.py": "efb54acb6a1cb80642aec0861c2e81ce67c0dc7ebf92bbaf368d7b00affede81",
+    "ops/bridge_one_shot/operator_lifecycle.py": "f09dbbcb6cd02eb6ab3823d24e97292ba6ba38135ddb48df9f3248b25e00ccf9",
+    "ops/bridge_one_shot/worker_firewall.sh": "9299f879861980389bcccf1c3afd0f7792a857ad6baa9c1ee287f4d0f4304da4",
+    "ops/github_inbox/root_signer.py": "d7d9cae83ae0e0b728574b998f9241df9f6e12c51e12ed87025cfce1916d61fd",
+    "ops/github_inbox/worker_credential.py": "405d1ef620da69dd8e2dff4606f22671121ef0be91fb562b3eec504d925cde77",
+    "ops/github_inbox/worker_preflight.py": "8d67c19e04df306888ce03a8aad333b4d1ff99176bea8f85695f1b2efe8a10f4",
+    "ops/github_inbox/worker_probe.py": "649fb748028750f70e6ba06ad442cbec6d0ce1793a69643995d63c4dc9dba0b9"
+  },
+  "from_adapter": "eac843de7967d48cce56ee9a198750e98754a2de",
+  "runner_commit": "e84021a786004456a12de9e25eae50d191da6cf1",
+  "schema": 2
+}
