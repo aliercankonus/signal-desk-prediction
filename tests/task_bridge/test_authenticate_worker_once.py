@@ -224,3 +224,12 @@ def test_proposed_loader_has_verified_digest_syntax_and_live_tty_reconnection():
     assert "digest = '"+hashlib.sha256((ROOT/'ops/bridge_one_shot/authenticate_worker_once.py').read_bytes()).hexdigest()+"'" in code
     assert code.index('hashlib.sha256')<code.index("os.open('/dev/tty'")<code.index("namespace['main']()")
     assert 'os.dup2(tty, 0)' in code
+
+
+def test_protected_module_replaces_stale_module_without_searching_sibling_paths(tmp_path,monkeypatch):
+    import sys
+    name='_auth_verified_import_fixture'
+    monkeypatch.setitem(sys.modules,name,SimpleNamespace(value='foreign'))
+    source=tmp_path/(name+'.py');source.write_text('value="reviewed"\n')
+    assert m.protected_module(name,source).value=='reviewed'
+    assert sys.modules[name].__file__==str(source)
