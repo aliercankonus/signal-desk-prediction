@@ -300,3 +300,21 @@ def test_system_crypto_is_fixed_ed25519_and_never_receives_secret_argv(monkeypat
     assert seen[0][0][1:] == ['genpkey','-algorithm','ED25519']
     assert seen[1][0][1:] == ['pkey','-pubout'] and seen[1][1]['input'] == private
     assert all(private.decode() not in arg for argv, _ in seen for arg in argv)
+
+
+def test_docker_format_final_newline_is_not_an_environment_name():
+    m = load()
+    raw = b'PATH\nPYTHONUNBUFFERED\nHERMES_HOME\n\n'
+    # Reproduce the old false positive with actual formatted output framing.
+    assert raw.decode().splitlines()[-1] == ''
+    assert m.image_env_names(raw) == ['PATH','PYTHONUNBUFFERED','HERMES_HOME']
+    assert m.image_env_names(b'PATH\n') == ['PATH']
+    assert m.image_env_names(b'\n') == []
+
+
+@pytest.mark.parametrize('raw', [b'PATH\nOLD_AUTH_TOKEN\n\n', b'PATH\n\nHOME\n\n',
+                                b'PATH\n\n\n', b'HOME=value\n\n', b'PATH\n'*257+b'\n'])
+def test_final_newline_fix_retains_name_and_secret_guards(raw):
+    m = load()
+    with pytest.raises(m.Stop, match='IMAGE_ENV_NAMES_REQUIRE_REVIEW'):
+        m.image_env_names(raw)

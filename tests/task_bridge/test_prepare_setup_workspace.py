@@ -75,7 +75,8 @@ def fixture(monkeypatch):
                         payload = metadata['image'] + '\n'
                     else:
                         assert argv[4] == '{{range .Config.Env}}{{println (index (split . "=") 0)}}{{end}}'
-                        payload = metadata.get('env_names', 'PATH\nHERMES_HOME\n')
+                        # println adds a per-name LF; Docker appends its LF.
+                        payload = metadata.get('env_names', 'PATH\nHERMES_HOME\n\n')
                 elif argv == ['docker', 'ps', '-aq', '--no-trunc']:
                     payload = '\n'.join(metadata['ids']) + '\n'
                 else:

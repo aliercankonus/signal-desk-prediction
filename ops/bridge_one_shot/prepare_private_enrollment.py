@@ -80,6 +80,19 @@ def root_bytes(file, limit):
         os.close(fd)
 
 
+def image_env_names(raw):
+    names = raw.decode('ascii').splitlines()
+    # println emits one LF per name; docker inspect --format appends a final
+    # LF as well. Discard only that single empty terminal record. Interior
+    # empty names and additional malformed records still fail validation.
+    if names and names[-1] == '':
+        names.pop()
+    if len(names) > 256 or any(not re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,127}', name) or
+            re.search('TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|AUTH', name, re.I) for name in names):
+        raise Stop('IMAGE_ENV_NAMES_REQUIRE_REVIEW')
+    return names
+
+
 def preflight(workspace, image):
     root_directory(workspace, private=True)
     if not re.fullmatch('sha256:[0-9a-f]{64}', image):
@@ -114,10 +127,7 @@ def preflight(workspace, image):
         raise Stop('IMAGE_ID_MISMATCH')
     # The Docker template emits variable NAMES only, never values. This check
     # is not image-filesystem/credential/App isolation proof.
-    names = boot.command(['docker','image','inspect','--format',ENV_NAMES,image]).decode().splitlines()
-    if len(names) > 256 or any(not re.fullmatch('[A-Za-z_][A-Za-z0-9_]{0,127}', name) or
-            re.search('TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|AUTH', name, re.I) for name in names):
-        raise Stop('IMAGE_ENV_NAMES_REQUIRE_REVIEW')
+    image_env_names(boot.command(['docker','image','inspect','--format',ENV_NAMES,image]))
     ids = boot.command(['docker','ps','-aq','--no-trunc']).decode('ascii').splitlines()
     if len(ids) > 32 or len(set(ids)) != len(ids) or any(not re.fullmatch('[0-9a-f]{64}', i) for i in ids):
         raise Stop('DOCKER_INVENTORY_BOUND')

@@ -130,3 +130,23 @@ this existing image/private venv is not claimed portable.
 Primary permission references:
 - https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
 - https://docs.github.com/en/rest/checks/runs?apiVersion=2022-11-28
+
+## Names-only refusal diagnosis
+
+If the entry stops with IMAGE_ENV_NAMES_REQUIRE_REVIEW before any token prompt,
+preserve state. The manager can supply this bounded read-only command with the
+already reviewed immutable image ID in place of `$REVIEWED_IMAGE`:
+
+```bash
+timeout 15s docker image inspect \
+  --format '{{range .Config.Env}}{{println (index (split . "=") 0)}}{{end}}' \
+  "$REVIEWED_IMAGE"
+```
+
+Return names only; never substitute a full inspect or Config.Env JSON dump.
+The template's per-name `println` plus Docker's final LF can produce one empty
+terminal record. The parser ignores exactly that record, while rejecting interior
+empty records, additional empty records, invalid names, more than 256 names and
+the same sensitive-name pattern. No token-name exemption or value read is added.
+A reviewed parser correction may be run using a new immutable entry pin/hash;
+existing cold files/intent still stop before any prompts and are never replaced.
