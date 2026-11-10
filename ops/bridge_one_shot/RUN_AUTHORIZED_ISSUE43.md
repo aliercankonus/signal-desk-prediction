@@ -38,6 +38,7 @@ Docker namespaces, exact mounts, UID/capabilities and restricted proxy/network
 provide the reviewed process boundary. No root signing key is worker-mounted.
 
 ```bash
+(
 read -r -p 'Existing absolute private setup workspace: ' SD_SETUP_WORKSPACE </dev/tty
 export SD_SETUP_WORKSPACE
 python3 -I -B - <<'PY'
@@ -79,7 +80,7 @@ try:
 except Exception:
     raise SystemExit('STOP: ENTRY_PRESERVE_STATE; no retry, overwrite or cleanup') from None
 PY
-unset SD_SETUP_WORKSPACE
+)
 ```
 
 Expected: `ISSUE43: REVIEW_READY`, `OWN_RUNTIME_CLEANUP: EXACT_IDS_VERIFIED`,
