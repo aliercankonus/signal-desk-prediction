@@ -84,8 +84,8 @@ TTY). Device URL/code remain visible only in that terminal.
 ```bash
 python3 -I -B - "$EXISTING_PRIVATE_WORKSPACE" <<'PYCODE'
 import hashlib, os, signal, sys, urllib.request
-source = '73ed6f658bab7d766d2db2f80d6a7bf431997516'
-digest = '98e90c15d5b20bf4fcf0739b830f1bd60b38ca0405d3adfdee20bcca4b40f378'
+source = '5ab5688eceaf014c372ea375eed13ab1dd3138c9'
+digest = 'ad963276b080d8c4bf50b9445a4c7fb11d9748b853b35f5c56c88c4018b4a2e8'
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs): raise RuntimeError('redirect refused')
 def expired(*_): raise TimeoutError()
