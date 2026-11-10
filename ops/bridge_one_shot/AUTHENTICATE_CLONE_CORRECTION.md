@@ -1,4 +1,12 @@
-# Corrected preflight for the unfinished authentication-only boundary
+# Corrected preflight and main-entry wiring for the unfinished auth boundary
+
+The first #71 entry is superseded: its main function accidentally selected the
+consumed auth-only-01 journal despite the correct 02 metadata guard. The preserved
+01 directory makes Journal.create fail before runtime effects. The current entry
+selects CORRECTED_JOURNAL (02); a main-entry test exercises real Journal creation
+with 01 already present and verifies exclusive 02 creation and refusal on repeat.
+Opaque errors now expose only a sanitized exception type and public function/line,
+never exception text, private paths or credential data.
 
 The first #70 operator entry returned unverified GitHub/provider checks and verified
 exact cleanup with `AUTH_ERROR_CALLEDPROCESSERROR`. Its output did not identify the
@@ -51,8 +59,8 @@ known existing private workspace; this block does not require a new spec or toke
 ```bash
 python3 -I -B - "$EXISTING_PRIVATE_WORKSPACE" <<'PYCODE'
 import hashlib, os, signal, sys, urllib.request
-source = 'c04f5103011882cc0f0649fba7ae72e5fbbf022c'
-digest = '45d00dfc94aabb4e175de2a72bd0389bfbdffaed66b57e86e9f6b633dfbf9d97'
+source = '5d1a005ae3a3a5816fd94ae085d6d81797e4cdf6'
+digest = '405e3a9ce73cf22403ea9d75a976df920cc99c1517b057749caa9681434f4b84'
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs): raise RuntimeError('redirect refused')
 def expired(*_): raise TimeoutError()
