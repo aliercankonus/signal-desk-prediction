@@ -37,14 +37,41 @@ cleanup. Lost create response or identity mismatch preserves the intent/containe
 for review; it never adopts a name/filter match as authority. Any prior probe intent
 blocks a second invocation, even after successful cleanup.
 
-Only after merge and immutable source/hash verification, the operator entry is:
+Only after manager review/merge and exact-head CI, the canonical loader below
+fetches the unchanged helper blob at an immutable source revision and verifies its
+SHA256 before executing it. The manager supplies the private workspace value in
+the user-facing command. No private path belongs in this repository.
 
 ```bash
-python3 -I -B /reviewed/private/probe_worker_runtime.py --workspace /existing/private/workspace --probe
+python3 -I -B - "$EXISTING_PRIVATE_WORKSPACE" <<'PY'
+import hashlib, signal, sys, urllib.request
+source = '76a4b5f4dcf92ad57eae1c693aa2272ade10a8ab'
+digest = '01361b11b151f7f61c2ad6c2a17ba9937dea0c61be25828ea120baf4aa476f16'
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs): raise RuntimeError('redirect refused')
+def expired(*_): raise TimeoutError()
+signal.signal(signal.SIGALRM, expired)
+signal.alarm(20)
+try:
+    url = 'https://raw.githubusercontent.com/aliercankonus/signal-desk-prediction/'+source+'/ops/bridge_one_shot/probe_worker_runtime.py'
+    with urllib.request.build_opener(NoRedirect).open(url, timeout=15) as response:
+        data = response.read(65537)
+    if len(data) > 65536 or hashlib.sha256(data).hexdigest() != digest:
+        raise RuntimeError('source digest mismatch')
+except Exception:
+    print('STOP: REVIEWED_PROBE_SOURCE_UNVERIFIED; preserve state; no retry')
+    raise SystemExit(1)
+finally:
+    signal.alarm(0)
+namespace = {'__name__':'reviewed_operator_probe'}
+exec(compile(data, '<reviewed-worker-runtime-probe>', 'exec'), namespace)
+sys.argv = ['probe', '--workspace', sys.argv[1], '--probe']
+raise SystemExit(namespace['main']())
+PY
 ```
 
-The manager supplies a filled, digest-verified loader privately; placeholders above
-are a procedure illustration, not a copy/paste host command.
+The workspace variable is a private substitution made by the manager; do not ask
+the operator to search for paths or construct another spec.
 
 Expected `WORKER_RUNTIME: CAPABILITY_PASS` or `BLOCKED`, individual fixed PASS/FAIL
 lines, `PROBE_CONTAINER: EXACT_ID_REMOVAL_VERIFIED`, and overall NO-GO. Missing tools
