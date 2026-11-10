@@ -171,3 +171,14 @@ def test_actual_owner_with_normal_clone_passes_new_gate_without_git_safety_overr
         rejected=subprocess.run(['git','-C',str(runner),'rev-parse','HEAD'],capture_output=True,timeout=10,
             env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','GIT_CONFIG_NOSYSTEM':'1','GIT_CONFIG_GLOBAL':'/dev/null'})
         assert rejected.returncode and b'dubious ownership' in rejected.stderr
+
+
+def test_corrected_entry_has_parseable_hash_bound_tty_loader():
+    import hashlib
+    text=(ROOT/'ops/bridge_one_shot/AUTHENTICATE_CLONE_CORRECTION.md').read_text()
+    block=text.split('```bash\n')[1].split('```')[0]
+    assert subprocess.run(['bash','-n'],input=block.encode(),capture_output=True).returncode==0
+    code=block.split("<<'PYCODE'\n")[1].rsplit('\nPYCODE',1)[0]
+    compile(code,'<corrected-loader>','exec')
+    digest=hashlib.sha256((ROOT/'ops/bridge_one_shot/authenticate_worker_clone_fix.py').read_bytes()).hexdigest()
+    assert "digest = '"+digest+"'" in code and 'os.dup2(tty, 0)' in code
