@@ -55,6 +55,12 @@ def blob(path, *, mode=0o600, limit=65536):
     return data
 
 
+def protected_module(name,path):
+    spec=importlib.util.spec_from_file_location(name,path)
+    module=importlib.util.module_from_spec(spec);sys.modules[name]=module;spec.loader.exec_module(module)
+    return module
+
+
 def load(workspace):
     if os.geteuid()!=0:raise Stop('ROOT_REQUIRED')
     w=Path(workspace)
@@ -76,8 +82,10 @@ def load(workspace):
         raise Stop('BUNDLE_MANIFEST')
     # Import only root-protected, digest-verified public code. No key/token store
     # is opened by these imports; no root signer, grant or report method is used.
-    spec=importlib.util.spec_from_file_location('_reviewed_auth_host',bundle/'operator_host_v2.py')
-    host=importlib.util.module_from_spec(spec);sys.modules[spec.name]=host;spec.loader.exec_module(host)
+    # The frozen adapter inserts sibling search paths. Pin its two project imports
+    # explicitly so an unrelated sibling directory cannot shadow verified code.
+    for name in ('operator_lifecycle','root_signer'):protected_module(name,bundle/(name+'.py'))
+    host=protected_module('_reviewed_auth_host',bundle/'operator_host_v2.py')
     plan=host.load_plan(w/(ATTEMPT+'-runtime-v2-plan.json'))
     original=json.loads(blob(w/(ATTEMPT+'-bootstrap-spec.json')))
     target={f.name:original[f.name] for f in host.fields(host.Plan)}
