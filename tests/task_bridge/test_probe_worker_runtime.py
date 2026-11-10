@@ -178,3 +178,26 @@ def test_unreviewed_image_names_or_volume_stop_before_intent(tmp_path,cfg,record
     def call(a,t):calls.append(a);return record
     with pytest.raises(m.Stop,match='IMAGE_METADATA'):m.probe(tmp_path,cfg,apply=True,call=call)
     assert len(calls)==1 and not list(tmp_path.iterdir())
+
+
+def test_canonical_loader_syntax_and_helper_digest():
+    text=(ROOT/'ops/bridge_one_shot/PROBE_WORKER_RUNTIME.md').read_text()
+    block=text.split('```bash\n')[1].split('```')[0]
+    assert subprocess.run(['bash','-n'],input=block.encode(),capture_output=True).returncode==0
+    code=block.split("<<'PY'\n")[1].rsplit('\nPY',1)[0]
+    compile(code,'<operator-loader>','exec')
+    digest=hashlib.sha256((ROOT/'ops/bridge_one_shot/probe_worker_runtime.py').read_bytes()).hexdigest()
+    assert "digest = '"+digest+"'" in code
+
+
+def test_actual_root_record_protection_and_no_overwrite():
+    if os.geteuid()!=0:pytest.skip('root-only input protection requires root CI')
+    with tempfile.TemporaryDirectory(dir=Path.home()) as folder:
+        root=Path(folder);root.chmod(0o700);m.root_dir(root)
+        target=root/'record.json';m.exclusive(target,{'public':True})
+        assert json.loads(m.read_root(target))=={'public':True}
+        with pytest.raises(FileExistsError):m.exclusive(target,{'overwritten':True})
+        link=root/'link.json';link.symlink_to(target)
+        with pytest.raises(m.Stop):m.read_root(link)
+        target.chmod(0o644)
+        with pytest.raises(m.Stop):m.read_root(target)
