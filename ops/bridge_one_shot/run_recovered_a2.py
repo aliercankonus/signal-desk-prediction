@@ -92,6 +92,7 @@ def main():
         signer=module('root_signer',blobs['signer']);host=auth.protected_module('_recovered_host',bundle/'operator_host_v2.py')
         host.check_signer_binding=lambda plan,scope:a2.binding(plan,scope,host,auth)
         old=host.load_plan(w/(a2.OLD+'-runtime-v2-plan.json'))
+        a2.reused_inputs(old,host)  # Token metadata/device-only config before any bind.
         phase='recovered-binding'
         client=signer.GitHub(old.signer_token)
         plan=gate.bind(w,old,host=host,recovery=recovery,a2=a2,client=client)
