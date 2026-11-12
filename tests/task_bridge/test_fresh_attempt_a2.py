@@ -350,3 +350,36 @@ def test_only_explicit_new_branch_404_can_be_absence(monkeypatch,status):
     for method,path in [('POST','/repos/'+m.REPO+'/git/ref/heads/'+m.BRANCH),('DELETE','/repos/'+m.REPO+'/issues/41/comments'),
         ('GET','/repos/'+m.REPO+'/actions/secrets'),('GET','/repos/'+m.REPO+'/git/ref/heads/issue43-one-shot-review-note')]:
         with pytest.raises(ValueError):client._request(method,path)
+
+
+def test_a2_signer_preserves_every_frozen_authority_claim_and_signature_gate():
+    old=ast.parse((ROOT/'ops/github_inbox/root_signer.py').read_text())
+    new=ast.parse((ROOT/'ops/github_inbox/root_signer_a2.py').read_text())
+    old_nodes={n.name:ast.dump(n,include_attributes=False) for n in old.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name!='GitHub'}
+    new_nodes={n.name:ast.dump(n,include_attributes=False) for n in new.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name!='GitHub'}
+    assert old_nodes==new_nodes
+
+
+def test_a2_ambiguous_sign_publication_is_consumed_and_old_instruction_refused():
+    signer=load('a2_sign_once','ops/github_inbox/root_signer_a2.py')
+    frozen=(ROOT/'tests/task_bridge/fixtures/issue43_body.txt').read_text()
+    scope=signer.Scope(repo=m.REPO,task_issue=43,body_digest=m.DIGEST,authority_identity=m.AUTHORITY,runner_commit=m.PIN,
+        start=row()['created_at'],cursors={'41':6999999999,'45':6713729283},app_id=1144995)
+    posts=[];signs=[]
+    client=SimpleNamespace(task=lambda *a:dict(number=43,state='open',body=frozen),comment=lambda *a:row())
+    def publish(*a):posts.append(a);raise TimeoutError('synthetic lost response')
+    client.publish=publish
+    with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+        root=Path(directory);root.chmod(0o700)
+        (root/'6775497757').mkdir();(root/'6775497757/state.json').write_text('preserved')
+        def sign(data):signs.append(data);return b'x'*64
+        with pytest.raises(ValueError):signer.sign_once(scope,root,client,41,6775497757,sign,verify=lambda *a:True)
+        with pytest.raises(TimeoutError):signer.sign_once(scope,root,client,41,7000000000,sign,verify=lambda *a:True)
+        with pytest.raises(FileExistsError):signer.sign_once(scope,root,client,41,7000000000,sign,verify=lambda *a:True)
+        assert len(posts)==len(signs)==1 and (root/'6775497757/state.json').read_text()=='preserved'
+
+
+def test_release_manifest_binds_actual_repository_dependency_bytes():
+    raw=(ROOT/'ops/bridge_one_shot/release_a2.json').read_bytes()
+    result=m.release('a'*40,hashlib.sha256(raw).hexdigest(),lambda commit,p:(ROOT/p).read_bytes())
+    assert set(result)==set(m.FILES)

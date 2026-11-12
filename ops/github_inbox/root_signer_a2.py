@@ -116,7 +116,7 @@ class GitHub:
     def _request(self, method, path, body=None):
         prefix = f'/repos/{REPO}/'
         readback = re.fullmatch(
-            r'(?:git/ref/heads/(?:main|issue43-one-shot-a2)|pulls\?state=open&head=aliercankonus%3Aissue43-one-shot-a2&per_page=2|compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|contents/docs/ONE_SHOT_REVIEW_NOTE\.md\?ref=[0-9a-f]{40}|commits/[0-9a-f]{40}/(?:check-runs\?per_page=100|status)|actions/runs\?head_sha=[0-9a-f]{40}&per_page=100|issues/43/comments\?per_page=100&page=[1-5])',
+            r'(?:git/ref/heads/(?:main|issue43-one-shot-a2)|pulls\?state=(?:open|all)&head=aliercankonus%3Aissue43-one-shot-a2&per_page=2|compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}|contents/docs/ONE_SHOT_REVIEW_NOTE\.md\?ref=[0-9a-f]{40}|commits/[0-9a-f]{40}/(?:check-runs\?per_page=100|status)|actions/runs\?head_sha=[0-9a-f]{40}&per_page=100|issues/43/comments\?per_page=100&page=[1-5])',
             path[len(prefix):]) if path.startswith(prefix) else None
         regular = path.startswith(prefix) and re.fullmatch(
                 r'(?:issues/43|issues/comments/[1-9][0-9]*|issues/(?:41|45)/comments(?:\?[^?]*)?)',

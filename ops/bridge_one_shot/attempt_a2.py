@@ -135,7 +135,7 @@ def stage(w,old,host,auth,signer,blobs,ident,*,clone_runner=clone):
     row=instruction(client,ident);task=client.task(43)
     if task.get('state')!='open' or hashlib.sha256(task['body'].encode()).hexdigest()!=DIGEST:raise Stop('FROZEN_TASK')
     prefix='/repos/'+REPO
-    if client.get(prefix+'/git/ref/heads/'+BRANCH)!={'missing':True} or client.get(prefix+'/pulls?state=open&head=aliercankonus%3A'+BRANCH+'&per_page=2')!=[]:raise Stop('NEW_BRANCH_OR_PR_EXISTS')
+    if client.get(prefix+'/git/ref/heads/'+BRANCH)!={'missing':True} or client.get(prefix+'/pulls?state=all&head=aliercankonus%3A'+BRANCH+'&per_page=2')!=[]:raise Stop('NEW_BRANCH_OR_PR_EXISTS')
     cursors={'41':ident-1,'45':6713729283}
     scope=dict(repo=REPO,task_issue=43,body_digest=DIGEST,authority_identity=AUTHORITY,runner_commit=PIN,start=row['created_at'],cursors=cursors,app_id=1144995)
     root=w/ATTEMPT
