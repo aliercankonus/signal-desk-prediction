@@ -94,7 +94,7 @@ def test_top_level_bootstrap_binds_before_any_lifecycle(monkeypatch,branch_exist
   host=SimpleNamespace(load_plan=lambda p:old)
   signer=SimpleNamespace(GitHub=lambda p:client,load_scope=lambda p:SimpleNamespace())
   gate=SimpleNamespace(bind=lambda *a,**k:(events.append('gate') or plan))
-  a2=SimpleNamespace(OLD='old',release=lambda *a:{k:k.encode() for k in ('auth','signer','cleanup','readback')},instruction=lambda *a:{'id':m.INSTRUCTION})
+  a2=SimpleNamespace(OLD='old',reused_inputs=lambda *a:events.append('reused-inputs'),release=lambda *a:{k:k.encode() for k in ('auth','signer','cleanup','readback')},instruction=lambda *a:{'id':m.INSTRUCTION})
   objects={'_recovered_a2':a2,'_recovered_auth':auth,'_recovered_object_v2':object(),'_recovered_gate':gate,'root_signer':signer,'_recovered_cleanup':object(),'_recovered_readback':object()}
   monkeypatch.setattr(m,'public',lambda *a:b'fixture verified-source seam')
   monkeypatch.setattr(m,'module',lambda name,data:objects[name])
