@@ -68,8 +68,9 @@ class Ops:
 
 def inspection(ops,auth,ident,service,running):
     assert (ident,service) in ((W,'inbox-worker'),(P,'connect-proxy'))
-    assert ident in ops.containers and (ident in ops.running)==running
+    assert ident in ops.containers and (running is None or (ident in ops.running)==running)
     ops.events.append(('inspect',ident,running))
+    return ident in ops.running
 
 
 def test_stop_verify_remove_order_and_only_owned_cleanup(monkeypatch):
@@ -112,8 +113,8 @@ def test_real_entry_directory_refuses_repeat_after_an_ambiguous_effect(tmp_path,
     assert 'STOP' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize('bad',[None,'network-peer','network-label','container','claim','owned'])
-def test_load_verifies_the_complete_recorded_identity_before_any_effect(tmp_path,bad):
+@pytest.mark.parametrize('bad',[None,'network-peer','network-label','network-geometry','container','claim','owned'])
+def test_load_verifies_the_complete_recorded_identity_before_any_effect(tmp_path,bad,monkeypatch):
     import hashlib
     inbox=tmp_path/'state'/'github-inbox';inbox.mkdir(parents=True)
     plan=SimpleNamespace(bundle=tmp_path/'bundle',journal_parent=tmp_path/'journals',state=tmp_path/'state',uid=10000)
@@ -135,24 +136,30 @@ def test_load_verifies_the_complete_recorded_identity_before_any_effect(tmp_path
             role='worker_isolated' if args[2]==N else 'proxy_uplink'
             labels={'com.docker.compose.network':role,'org.signal-desk.issue41.attempt':m.ATTEMPT}
             if bad=='network-label':labels['org.signal-desk.issue41.attempt']='other'
-            peers={W:{},P:{}} if role=='worker_isolated' else {P:{}}
+            peers={W:{'IPv4Address':'172.30.50.2/28'},P:{'IPv4Address':'172.30.50.3/28'}} if role=='worker_isolated' else {P:{'IPv4Address':'172.30.51.2/28'}}
             if bad=='network-peer':peers[O]={}
             return json.dumps([dict(Id=args[2],Labels=labels,Containers=peers)])
         def _container(self,ident,service,*,running):
             calls.append(('metadata',ident,service,running))
             if bad=='container':raise m.Stop('TEST_CONFINEMENT_REFUSAL')
-            assert (ident,service,running) in ((W,'inbox-worker',True),(P,'connect-proxy',True))
+            assert (ident,service,running) in ((W,'inbox-worker',None),(P,'connect-proxy',None))
+            return True
         def _call(self,args,**kw):
             calls.append(args)
             assert args in (['bash',plan.bundle/'worker_firewall.sh','status'],['iptables','-S'])
             return JUMPS if args[0]=='iptables' else 'PASS'
     host=SimpleNamespace(load_plan=lambda p:plan,trusted_worker_mount=lambda *a:None,
         worker_private_bytes=lambda *a:state_bytes,HostOperations=ReadOnlyOps,CommandRunner=lambda **kw:None)
+    def validate_network(row,role,proxy_id):
+        assert set(row['Containers'])=={P} and proxy_id==P
+        if bad=='network-geometry':raise m.Stop('TEST_NETWORK_GEOMETRY_REFUSAL')
+        return row['Id']
     auth=SimpleNamespace(blob=lambda p,**kw:blob_map[p],root_dir=lambda p:None,RELEASE={'fixture.py':hashlib.sha256(b'reviewed').hexdigest()},
-        protected_module=lambda name,p:host if name=='_protected_cleanup_host' else None,
+        protected_module=lambda name,p:host if name=='_protected_cleanup_host' else SimpleNamespace(validate_attempt_network=validate_network),
         mounts=lambda *a:{},configure=lambda *a:None)
     task=SimpleNamespace(TASK_JOURNAL=m.ATTEMPT+'-issue43-once',task_mounts=lambda *a:{})
     diag=SimpleNamespace(inspect=lambda *a:(tmp_path,{'bundle':str(plan.bundle)},diagnostic),QUEUE='queue')
+    monkeypatch.setattr(m,'exact_container',lambda ops,auth,ident,service,running:ops._container(ident,service,running=running))
     if bad:
         with pytest.raises(m.Stop):m.load(str(tmp_path),auth,task,diag)
     else:
@@ -160,3 +167,25 @@ def test_load_verifies_the_complete_recorded_identity_before_any_effect(tmp_path
         assert w==tmp_path and pbytes==phase_bytes and sbytes==state_bytes
         assert ops.worker_id==W and ops.proxy_id==P and ops.network_ids=={'worker_isolated':N,'proxy_uplink':U}
     assert all('stop' not in item and 'rm' not in item and 'rollback' not in item and 'exec' not in item for item in calls)
+
+
+@pytest.mark.parametrize('stopped',[{W},{P},{W,P}])
+def test_known_stopped_containers_are_removed_without_start_or_second_stop(monkeypatch,stopped):
+    monkeypatch.setattr(m,'exact_container',inspection);ops=Ops();ops.running-=stopped;writes=[]
+    m.cleanup(ops,None,lambda name,data:writes.append(name))
+    stops=[event[1][-1] for event in ops.events if event[0]=='docker' and event[1][0]=='stop']
+    assert set(stops)=={W,P}-stopped
+    assert ops.containers==ops.networks=={O} and writes[-1]=='runtime-cleanup-verified'
+
+
+def test_live_network_accepts_only_owned_running_or_stopped_peers():
+    calls=[]
+    validator=SimpleNamespace(validate_attempt_network=lambda row,role,proxy_id:(calls.append((row,proxy_id)) or row['Id']))
+    row=dict(Id=N,Containers={P:{'IPv4Address':'172.30.50.3/28'}})
+    m.live_network(row,'worker_isolated',W,P,{W:False,P:True},validator)
+    assert calls[-1][1]==P
+    m.live_network(dict(Id=N,Containers={}), 'worker_isolated',W,P,{W:False,P:False},validator)
+    assert calls[-1][1] is None
+    with pytest.raises(m.Stop):m.live_network(row,'worker_isolated',W,P,{W:True,P:True},validator)
+    with pytest.raises(m.Stop):m.live_network(dict(Id=N,Containers={O:{}}),'worker_isolated',W,P,{W:False,P:False},validator)
+    with pytest.raises(m.Stop):m.live_network(dict(Id=N,Containers={P:{'IPv4Address':'10.1.1.1/24'}}),'worker_isolated',W,P,{W:False,P:True},validator)
