@@ -383,3 +383,25 @@ def test_release_manifest_binds_actual_repository_dependency_bytes():
     raw=(ROOT/'ops/bridge_one_shot/release_a2.json').read_bytes()
     result=m.release('a'*40,hashlib.sha256(raw).hexdigest(),lambda commit,p:(ROOT/p).read_bytes())
     assert set(result)==set(m.FILES)
+
+
+def test_operator_block_parses_and_binds_exact_source_and_manifest(tmp_path):
+    text=(ROOT/'ops/bridge_one_shot/FRESH_ATTEMPT_A2.md').read_text()
+    block=text.split('```bash\n',1)[1].split('\n```',1)[0]
+    assert not any(__import__('re').match(r'^\s*[0-9]+[:|]',line) for line in block.splitlines())
+    subprocess.run(['bash','-n'],input=block.encode(),check=True)
+    embedded=block.split("python3 -I -B -c '\n",1)[1].split("\n' \"$A2_WORKSPACE\"",1)[0]
+    tree=ast.parse(embedded)
+    constants={node.targets[0].id:node.value.value for node in tree.body if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name) and isinstance(node.value,ast.Constant)}
+    assert constants['expected']==hashlib.sha256((ROOT/'ops/bridge_one_shot/attempt_a2.py').read_bytes()).hexdigest()
+    assert constants['manifest']==hashlib.sha256((ROOT/'ops/bridge_one_shot/release_a2.json').read_bytes()).hexdigest()
+    # Execute the copyable loader with synthetic verified source. A bad digest
+    # refuses before any compiled source/host effect. No network or host change.
+    class Response:
+        def __enter__(self):return self
+        def __exit__(self,*a):pass
+        def read(self,n):return b'raise AssertionError("must never execute")'
+    scope={'__name__':'__main__'}
+    from unittest.mock import patch
+    with patch('urllib.request.build_opener',return_value=SimpleNamespace(open=lambda *a,**kw:Response())),patch.object(sys,'argv',['loader','/private','7000000000']):
+        with pytest.raises(SystemExit,match='entry digest'):exec(compile(embedded,'<operator-loader>','exec'),scope)
