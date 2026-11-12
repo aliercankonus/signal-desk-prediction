@@ -103,3 +103,16 @@ def test_top_level_bootstrap_binds_before_any_lifecycle(monkeypatch,branch_exist
   monkeypatch.setattr(sys,'argv',['entry','--workspace',str(w),'--execute-approved-once'])
   assert m.main()==(1 if branch_exists else 0)
   assert 'gate' in events and ('lifecycle' in events) is not branch_exists
+
+
+def test_immutable_operator_loader_syntax_and_digest_binding():
+ import ast,hashlib
+ text=(ROOT/'ops/bridge_one_shot/RUN_RECOVERED_A2.md').read_text()
+ block=text.split('```bash\n',1)[1].split('\n```',1)[0]
+ import subprocess
+ subprocess.run(['bash','-n'],input=block.encode(),check=True)
+ embedded=block.split("python3 -I -B -c '\n",1)[1].split("\n' \"$RECOVERED_WORKSPACE\"",1)[0]
+ tree=ast.parse(embedded)
+ values={n.targets[0].id:n.value.value for n in tree.body if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and isinstance(n.value,ast.Constant)}
+ assert values['expected']==hashlib.sha256((ROOT/'ops/bridge_one_shot/run_recovered_a2.py').read_bytes()).hexdigest()
+ assert values['commit']=='51e6578b67598bdd5577c3f2e52a1fe65b449fe7'
