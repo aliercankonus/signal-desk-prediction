@@ -61,3 +61,45 @@ def test_real_one_way_journal_no_replay_and_ambiguous_effect_preserved(monkeypat
   assert calls.count('configure')==1 and calls.count('one_bridge_claim')<=1
   saved=json.loads((w/m.DIRECTORY/'journals/approved-runtime-01/phase.json').read_text())
   assert saved['attempt']=='fixture-attempt'
+
+
+def test_public_digest_refuses_before_module_execution(monkeypatch):
+ class Response:
+  def __enter__(self):return self
+  def __exit__(self,*a):pass
+  def read(self,n):return b'raise AssertionError("not executed")'
+ monkeypatch.setattr(m.urllib.request,'build_opener',lambda *a:SimpleNamespace(open=lambda *a,**k:Response()))
+ with pytest.raises(ValueError,match='digest'):m.public('a'*40,'ops/public.py','0'*64)
+
+
+def test_existing_integration_refuses_before_source_or_credential_read(monkeypatch):
+ with tempfile.TemporaryDirectory(dir=Path.home()) as d:
+  w=Path(d);(w/m.DIRECTORY).mkdir()
+  monkeypatch.setattr(sys,'argv',['entry','--workspace',str(w),'--execute-approved-once'])
+  monkeypatch.setattr(m.os,'geteuid',lambda:0);monkeypatch.setattr(sys.stdin,'isatty',lambda:True)
+  monkeypatch.setattr(m,'public',lambda *a:pytest.fail('no replay network'))
+  assert m.main()==1
+
+
+@pytest.mark.parametrize('branch_exists',[False,True])
+def test_top_level_bootstrap_binds_before_any_lifecycle(monkeypatch,branch_exists):
+ with tempfile.TemporaryDirectory(dir=Path.home()) as d:
+  w=Path(d);events=[];rootbytes=b'root fixture'
+  import hashlib
+  old=SimpleNamespace(signer_token=w/'token');plan=SimpleNamespace(signer_policy=w/'scope')
+  client=SimpleNamespace(get=lambda path:({'missing':True} if not branch_exists else {'object':{}}) if '/git/ref/' in path else [])
+  auth=SimpleNamespace(root_dir=lambda p:events.append('private-root'),blob=lambda p:rootbytes,
+    RELEASE={'ops/bridge_one_shot/'+n:hashlib.sha256(rootbytes).hexdigest() for n in ('operator_lifecycle.py','operator_host_v2.py')},
+    protected_module=lambda name,p:host if name=='_recovered_host' else None)
+  host=SimpleNamespace(load_plan=lambda p:old)
+  signer=SimpleNamespace(GitHub=lambda p:client,load_scope=lambda p:SimpleNamespace())
+  gate=SimpleNamespace(bind=lambda *a,**k:(events.append('gate') or plan))
+  a2=SimpleNamespace(OLD='old',release=lambda *a:{k:k.encode() for k in ('auth','signer','cleanup','readback')},instruction=lambda *a:{'id':m.INSTRUCTION})
+  objects={'_recovered_a2':a2,'_recovered_auth':auth,'_recovered_object_v2':object(),'_recovered_gate':gate,'root_signer':signer,'_recovered_cleanup':object(),'_recovered_readback':object()}
+  monkeypatch.setattr(m,'public',lambda *a:b'fixture verified-source seam')
+  monkeypatch.setattr(m,'module',lambda name,data:objects[name])
+  monkeypatch.setattr(m,'integrate',lambda *a,**k:(events.append('lifecycle') or dict(status='review-ready',cleanup_verified=True,report_receipt='123')))
+  monkeypatch.setattr(m.os,'geteuid',lambda:0);monkeypatch.setattr(sys.stdin,'isatty',lambda:True)
+  monkeypatch.setattr(sys,'argv',['entry','--workspace',str(w),'--execute-approved-once'])
+  assert m.main()==(1 if branch_exists else 0)
+  assert 'gate' in events and ('lifecycle' in events) is not branch_exists
