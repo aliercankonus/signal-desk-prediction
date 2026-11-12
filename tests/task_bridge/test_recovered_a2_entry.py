@@ -19,6 +19,9 @@ def test_real_one_way_journal_no_replay_and_ambiguous_effect_preserved(monkeypat
  class Plan:
   attempt:str
   journal_parent:Path
+  runner:Path
+  uid:int
+  gid:int
  with tempfile.TemporaryDirectory(dir=Path.home()) as d:
   w=Path(d);w.chmod(0o700);calls=[]
   # Root ownership is a fixture seam only. Exclusive files and the frozen real
@@ -52,7 +55,8 @@ def test_real_one_way_journal_no_replay_and_ambiguous_effect_preserved(monkeypat
   a2=SimpleNamespace(ATTEMPT='fixture-attempt',mkdir=mkdir,put=put,configure=lambda *a:(calls.append('configure') or Ops()))
   blobs={'capture':(ROOT/'ops/github_inbox/child_capture_a2.py').read_bytes(),'factory':(ROOT/'ops/github_inbox/factory_a2.py').read_bytes(),'write_root':(ROOT/'ops/github_inbox/queued_write_root.py').read_bytes()}
   auth=SimpleNamespace(blob=lambda p,**kw:blobs[p.stem],WORKER_PREFLIGHT_V3=b'public fixture')
-  plan=Plan('fixture-attempt',w/'unused')
+  runner=w/'new-runner';runner.mkdir(mode=0o755)
+  plan=Plan('fixture-attempt',w/'unused',runner,os.geteuid(),os.getegid())
   result=m.integrate(w,plan,plan,a2=a2,auth=auth,host=lifecycle,cleanup=None,readback=None,signer=None,scope=None,row=None)
   assert result['cleanup_verified'] is (failure is None)
   assert ('cleanup' in calls) is (failure is None)
@@ -91,10 +95,10 @@ def test_top_level_bootstrap_binds_before_any_lifecycle(monkeypatch,branch_exist
   auth=SimpleNamespace(root_dir=lambda p:events.append('private-root'),blob=lambda p:rootbytes,
     RELEASE={'ops/bridge_one_shot/'+n:hashlib.sha256(rootbytes).hexdigest() for n in ('operator_lifecycle.py','operator_host_v2.py')},
     protected_module=lambda name,p:host if name=='_recovered_host' else None)
-  host=SimpleNamespace(load_plan=lambda p:old)
+  host=SimpleNamespace(load_plan=lambda p:old,trusted_worker_mount=lambda *a:None)
   signer=SimpleNamespace(GitHub=lambda p:client,load_scope=lambda p:SimpleNamespace())
   gate=SimpleNamespace(bind=lambda *a,**k:(events.append('gate') or plan))
-  a2=SimpleNamespace(OLD='old',reused_inputs=lambda *a:events.append('reused-inputs'),release=lambda *a:{k:k.encode() for k in ('auth','signer','cleanup','readback')},instruction=lambda *a:{'id':m.INSTRUCTION})
+  a2=SimpleNamespace(OLD='old',ATTEMPT='fixture-attempt',reused_inputs=lambda *a:events.append('reused-inputs'),release=lambda *a:{k:k.encode() for k in ('auth','signer','cleanup','readback')},instruction=lambda *a:{'id':m.INSTRUCTION})
   objects={'_recovered_a2':a2,'_recovered_auth':auth,'_recovered_object_v2':object(),'_recovered_gate':gate,'root_signer':signer,'_recovered_cleanup':object(),'_recovered_readback':object()}
   monkeypatch.setattr(m,'public',lambda *a:b'fixture verified-source seam')
   monkeypatch.setattr(m,'module',lambda name,data:objects[name])
@@ -105,14 +109,25 @@ def test_top_level_bootstrap_binds_before_any_lifecycle(monkeypatch,branch_exist
   assert 'gate' in events and ('lifecycle' in events) is not branch_exists
 
 
+
+
+def test_only_new_top_directory_tightened_with_no_recursive_changes():
+ with tempfile.TemporaryDirectory() as d:
+  root=Path(d);runner=root/'runner';runner.mkdir(mode=0o755);old=root/'old';old.mkdir(mode=0o755)
+  tracked=runner/'tracked';tracked.write_text('fixture');tracked.chmod(0o644)
+  m.tighten_runner(SimpleNamespace(runner=runner,uid=os.geteuid(),gid=os.getegid()))
+  assert runner.stat().st_mode&0o777==0o700 and tracked.stat().st_mode&0o777==0o644 and old.stat().st_mode&0o777==0o755
+  runner.chmod(0o777)
+  with pytest.raises(ValueError):m.tighten_runner(SimpleNamespace(runner=runner,uid=os.geteuid(),gid=os.getegid()))
+
+
+
 def test_immutable_operator_loader_syntax_and_digest_binding():
- import ast,hashlib
+ import ast,hashlib,subprocess
  text=(ROOT/'ops/bridge_one_shot/RUN_RECOVERED_A2.md').read_text()
  block=text.split('```bash\n',1)[1].split('\n```',1)[0]
- import subprocess
  subprocess.run(['bash','-n'],input=block.encode(),check=True)
  embedded=block.split("python3 -I -B -c '\n",1)[1].split("\n' \"$RECOVERED_WORKSPACE\"",1)[0]
- tree=ast.parse(embedded)
- values={n.targets[0].id:n.value.value for n in tree.body if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and isinstance(n.value,ast.Constant)}
+ values={n.targets[0].id:n.value.value for n in ast.parse(embedded).body if isinstance(n,ast.Assign) and isinstance(n.targets[0],ast.Name) and isinstance(n.value,ast.Constant)}
  assert values['expected']==hashlib.sha256((ROOT/'ops/bridge_one_shot/run_recovered_a2.py').read_bytes()).hexdigest()
- assert values['commit']=='51e6578b67598bdd5577c3f2e52a1fe65b449fe7'
+ assert values['commit']=='87f99921d862b272a2e8c36121df97862959f6ba'
