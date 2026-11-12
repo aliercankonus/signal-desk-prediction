@@ -1,3 +1,5 @@
+> **SUPERSEDED — DO NOT RUN THE TASK ENTRY BELOW.** The object-only source clone defect can leave a partial preparation. Preserve it; use only the separately reviewed preparation-only procedure in [RECOVER_A2_OBJECT_CLONE.md](RECOVER_A2_OBJECT_CLONE.md). That recovery does not authorize or resume a task.
+
 # One separately approved #43 attempt: a2
 
 Prepared source only. **Do not run the effectful block until Ali gives a new,
