@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import sys
 import types
 import urllib.request
@@ -41,6 +42,34 @@ def module(name,data):
     exec(compile(data,'<hash-verified-source>','exec'),result.__dict__);return result
 
 
+def candidate_view(host,runner):
+    # Read-only proposal may observe Git's 0755 top directory beneath a verified
+    # root-private recovery directory. The REAL host validator is never changed.
+    view=types.SimpleNamespace(**vars(host))
+    original=host.trusted_worker_mount
+    def trust(path,uid):
+        path=Path(path)
+        if path==runner:
+            info=path.lstat()
+            if stat.S_ISDIR(info.st_mode) and (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))==(10000,10000,0o755):
+                original(path.parent,0);return
+        return original(path,uid)
+    view.trusted_worker_mount=trust
+    return view
+
+
+def tighten_runner(plan):
+    path=plan.runner;before=path.lstat()
+    if not stat.S_ISDIR(before.st_mode) or (before.st_uid,before.st_gid)!=(plan.uid,plan.gid) or stat.S_IMODE(before.st_mode) not in (0o700,0o755):raise ValueError('candidate directory metadata')
+    fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        opened=os.fstat(fd)
+        if (opened.st_dev,opened.st_ino,opened.st_uid,opened.st_gid,opened.st_mode)!=(before.st_dev,before.st_ino,before.st_uid,before.st_gid,before.st_mode):raise ValueError('candidate inode changed')
+        os.fchmod(fd,0o700);os.fsync(fd)
+        if (path.lstat().st_dev,path.lstat().st_ino)!=(opened.st_dev,opened.st_ino):raise ValueError('candidate path changed')
+    finally:os.close(fd)
+
+
 def integrate(w,plan,old,*,a2,auth,host,cleanup,readback,signer,scope,row,root=None):
     """One-way root preparation followed by the unchanged frozen lifecycle.
     Never calls staging/clone/login enrollment entry or clears an old journal.
@@ -48,6 +77,7 @@ def integrate(w,plan,old,*,a2,auth,host,cleanup,readback,signer,scope,row,root=N
     root=root or w/DIRECTORY
     a2.mkdir(root)  # Exclusive durable directory; partial state never resumes.
     a2.put(root/'intent.json',dict(schema=1,instruction_id=INSTRUCTION,task='one-approved-a2',retry=False))
+    tighten_runner(plan)  # Only the verified NEW runner top directory; no Git.
     a2.mkdir(root/'helpers');a2.mkdir(root/'journals')
     for name in ('capture','factory','write_root'):
         path=w/a2.ATTEMPT/'helpers'/(name+'.py')
@@ -95,7 +125,7 @@ def main():
         a2.reused_inputs(old,host)  # Token metadata/device-only config before any bind.
         phase='recovered-binding'
         client=signer.GitHub(old.signer_token)
-        plan=gate.bind(w,old,host=host,recovery=recovery,a2=a2,client=client)
+        plan=gate.bind(w,old,host=candidate_view(host,w/a2.ATTEMPT/'object-clone-recovery-02'/'runner'),recovery=recovery,a2=a2,client=client)
         prefix='/repos/'+REPO
         if client.get(prefix+'/git/ref/heads/issue43-one-shot-a2')!={'missing':True} or client.get(prefix+'/pulls?state=all&head=aliercankonus%3Aissue43-one-shot-a2&per_page=2')!=[]:raise ValueError('task branch or PR exists')
         scope=signer.load_scope(plan.signer_policy);row=a2.instruction(client,INSTRUCTION)
