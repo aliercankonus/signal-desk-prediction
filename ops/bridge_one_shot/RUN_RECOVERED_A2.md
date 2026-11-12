@@ -27,6 +27,13 @@ e84021a786004456a12de9e25eae50d191da6cf1 remain unchanged.
 Only a new root-private `issue43-a2-integration-01` directory is created. Its
 exclusive fsynced intent precedes helper/plan/journal creation. Only immutable
 public capture/factory/write-root helpers are copied; credentials are not copied.
+The read-only proposal adapter accepts Git's normal recovered top-directory
+0755 only for the exact worker-owned recovery-02 runner beneath its verified
+root-private parent. It does not change the real host validator. After the new
+integration intent is durable, an inode-bound no-follow descriptor tightens ONLY
+that new runner top directory to 0700; files, old runners and ownership are not
+changed. Other modes/owners/symlinks refuse. The unchanged real host preflight
+still requires its original strict private-directory rules.
 The frozen lifecycle uses a new journal and mandatory worker owner/Git clean/
 CLI/context preflight, authenticated read-only checks, one exact signature/grant,
 one Bridge claim and independent root artifact/draft/CI readback. The native
@@ -47,8 +54,8 @@ manager-exclusive App invocation and first actual loop are not proven offline.
 
 ## Immutable operator handoff
 
-Source `51e6578b67598bdd5577c3f2e52a1fe65b449fe7`.
-Entry SHA256 `81707b3647f26b1538884ad37e1d939f479b4bf91bcabea879b9ac7a30aa580d`.
+Source `87f99921d862b272a2e8c36121df97862959f6ba`.
+Entry SHA256 `563fe7cff46756c89aca875495ed0c7ed8f5caedad728835936dbab97af4efe1`.
 
 Run only once in the existing VPS root terminal. No manual spec or report relay.
 The default source entry is inert; the explicit flag below selects only the
@@ -61,8 +68,8 @@ test "$(id -u)" -eq 0 && test -t 0
 read -r -p 'Existing protected setup workspace (absolute path): ' RECOVERED_WORKSPACE
 python3 -I -B -c '
 import hashlib,signal,sys,urllib.request
-commit="51e6578b67598bdd5577c3f2e52a1fe65b449fe7"
-expected="81707b3647f26b1538884ad37e1d939f479b4bf91bcabea879b9ac7a30aa580d"
+commit="87f99921d862b272a2e8c36121df97862959f6ba"
+expected="563fe7cff46756c89aca875495ed0c7ed8f5caedad728835936dbab97af4efe1"
 workspace=sys.argv[1]
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*a,**kw):raise RuntimeError("redirect refused")
