@@ -24,9 +24,10 @@ for the final sanitized report.
 
 After all metadata gates, it creates a fresh one-use root cleanup directory and
 fsyncs identity/baseline/intents before effects. It stops/verifies/removes only
-the recorded worker ID, rolls back only the reviewed SD_ONCE rules, then stops/
+the recorded worker ID (or verifies it already stopped without starting it), rolls back only the reviewed SD_ONCE rules, then stops/
 verifies/removes only the recorded proxy ID and removes their exact empty,
-validated networks. It compares all unrelated container/network IDs before and
+validated networks. A stopped proxy is also never started or stopped again. Missing
+IDs still refuse cleanup; only present, fully verified owned resources qualify. It compares all unrelated container/network IDs before and
 after. Concurrent resources, changed metadata or ambiguous effects stop the
 procedure; there is no automatic retry, guessed removal, compose down, global
 firewall flush, Docker socket mount or broad host access.
@@ -56,7 +57,7 @@ workspace = os.environ.get('SD_SETUP_WORKSPACE', '')
 if not workspace.startswith('/') or '..' in pathlib.Path(workspace).parts:
     raise SystemExit('STOP: WORKSPACE_REQUIRED')
 url = ('https://raw.githubusercontent.com/aliercankonus/signal-desk-prediction/'
-       'dac9749cd6b2f58f0d0f9ce7d1d9092ef1d1c1af/'
+       'ef50c42ac396a59586fd7a63349cda7deb5faead/'
        'ops/bridge_one_shot/cleanup_consumed_issue43.py')
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -64,7 +65,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 try:
     with urllib.request.build_opener(NoRedirect).open(url, timeout=20) as response:
         data = response.read(65537)
-    if not data or len(data) > 65536 or hashlib.sha256(data).hexdigest() != '819333dbcd88d7b077fb3d1550656096423560de9a2ce77bb46c1b8322f8a18e':
+    if not data or len(data) > 65536 or hashlib.sha256(data).hexdigest() != 'fb1443721f93b3a207cfbcaab569112427ecffdee7d32afa334a5367863fb018':
         raise RuntimeError('immutable source digest mismatch')
     folder = pathlib.Path(tempfile.mkdtemp(prefix='signal-desk-issue43-cleanup-', dir='/root'))
     path = folder / 'cleanup_consumed_issue43.py'
