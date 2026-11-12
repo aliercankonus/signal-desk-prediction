@@ -105,28 +105,55 @@ def load(workspace,auth,task,diag):
     deadline=time.monotonic()+600
     ops=host.HostOperations(plan,runner=host.CommandRunner(deadline=deadline),deadline=deadline)
     ops.worker_id=resources['worker'][0];ops.proxy_id=resources['proxy'][0]
+    network_validator=auth.protected_module('_protected_cleanup_network',bundle/'network_resources.py')
+    # Both IDs must still exist, but their own sleep/runtime may already have
+    # exited. Never start a stopped container merely to clean it.
+    running={ops.worker_id:exact_container(ops,auth,ops.worker_id,'inbox-worker',None),
+             ops.proxy_id:exact_container(ops,auth,ops.proxy_id,'connect-proxy',None)}
     for ident in resources['network']:
         rows=json.loads(ops._docker('network','inspect',ident,timeout=10))
         if len(rows)!=1 or rows[0].get('Id')!=ident:raise Stop('NETWORK_IDENTITY')
         row=rows[0];labels=row.get('Labels') or {};role=labels.get('com.docker.compose.network')
         if role not in ('worker_isolated','proxy_uplink') or role in ops.network_ids or labels.get('org.signal-desk.issue41.attempt')!=ATTEMPT:
             raise Stop('NETWORK_SCOPE')
-        wanted={ops.worker_id,ops.proxy_id} if role=='worker_isolated' else {ops.proxy_id}
-        if set(row.get('Containers') or {})!=wanted:raise Stop('NETWORK_PEERS')
+        live_network(row,role,ops.worker_id,ops.proxy_id,running,network_validator)
         ops.network_ids[role]=ident
-    auth.configure(ops,phase_file.parent/'compose.issue43-once.json')
-    # Complete UID/image/capability/mount/environment/peer verification before any mutation.
-    ops._container(ops.worker_id,'inbox-worker',running=True)
-    ops._container(ops.proxy_id,'connect-proxy',running=True)
     ops._call(['bash',plan.bundle/'worker_firewall.sh','status'],timeout=30)
     firewall_references(ops._call(['iptables','-S'],timeout=20))
     return w,ops,phase_file,phase_bytes,inbox/'state.json',state_bytes
 
 
+def live_network(row,role,worker,proxy,running,validator):
+    peers=row.get('Containers') or {}
+    allowed={worker,proxy} if role=='worker_isolated' else {proxy}
+    if not isinstance(peers,dict) or not set(peers).issubset(allowed):raise Stop('NETWORK_PEERS')
+    if any(running[i] and i not in peers for i in allowed):raise Stop('RUNNING_PEER_MISSING')
+    if role=='worker_isolated':
+        for ident,address in ((worker,'172.30.50.2/28'),(proxy,'172.30.50.3/28')):
+            observed=peers.get(ident,{}).get('IPv4Address')
+            if observed and observed!=address:raise Stop('NETWORK_ADDRESS')
+    # The frozen validator checks full geometry and labels. The complete actual
+    # peer set was checked above; omit only our known worker from this read-only
+    # pre-worker-start evidence copy, and handle a stopped/absent proxy as empty.
+    active_proxy=proxy in peers and bool(peers[proxy].get('IPv4Address'))
+    evidence=dict(row,Containers={proxy:peers[proxy]} if active_proxy else {})
+    if validator.validate_attempt_network(evidence,role,proxy_id=proxy if active_proxy else None)!=row['Id']:
+        raise Stop('NETWORK_GEOMETRY')
+
+
 def exact_container(ops,auth,ident,service,running):
     lines=ops._docker('inspect','--type','container','--format',auth.FORMAT,ident,timeout=10).splitlines()
     if len(lines)!=len(auth.SELECT):raise Stop('CONTAINER_INSPECTION')
-    auth.confined(dict(zip(auth.SELECT,map(json.loads,lines))),ident,service,ops.plan,running)
+    data=dict(zip(auth.SELECT,map(json.loads,lines)))
+    auth.confined(data,ident,service,ops.plan,running)
+    names=ops._docker('inspect','--type','container','--format',
+        '{{range .Config.Env}}{{println (index (split . "=") 0)}}{{end}}',ident,timeout=10).splitlines()
+    if names and names[-1]=='':names.pop()
+    allowed=auth.IMAGE_ENV|{'GIT_CONFIG_GLOBAL','GIT_CONFIG_NOSYSTEM','TERMINAL_ENV','TMPDIR','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY'}
+    if len(names)!=len(set(names)) or not set(names).issubset(allowed):raise Stop('ENVIRONMENT_NAMES')
+    state=data['.State.Running']
+    if type(state) is not bool:raise Stop('RUNNING_METADATA')
+    return state
 
 
 def cleanup(ops,auth,write):
@@ -139,9 +166,9 @@ def cleanup(ops,auth,write):
         raise Stop('BASELINE_IDS')
     write('baseline',dict(containers=before_containers,networks=before_networks))
     for role,ident,service in (('worker',ops.worker_id,'inbox-worker'),('proxy',ops.proxy_id,'connect-proxy')):
-        exact_container(ops,auth,ident,service,True)
-        write('stop-'+role+'-intent',dict(id=ident))
-        ops._docker('stop','--time','5',ident,timeout=20)
+        was_running=exact_container(ops,auth,ident,service,None)
+        write('stop-'+role+'-intent',dict(id=ident,observed_running=was_running))
+        if was_running:ops._docker('stop','--time','5',ident,timeout=20)
         exact_container(ops,auth,ident,service,False)
         write('stop-'+role+'-verified',dict(id=ident))
         write('remove-'+role+'-intent',dict(id=ident))
