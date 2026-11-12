@@ -1,3 +1,5 @@
+> **SUPERSEDED — DO NOT RUN ANY ENTRY BELOW.** Preserve both failed preparations. Use only the separately reviewed preparation-only [Git capture recovery v2](RECOVER_A2_OBJECT_CLONE_V2.md); it does not run a task or resume either old entry.
+
 # Preparation-only a2 object-store recovery
 
 The earlier a2 task entry is withdrawn after a source-preparation STOP. Do not
