@@ -28,8 +28,8 @@ The consumed queue `2f175fc762d5476c8938472c7f784094` and run
 `a4db0f8a32ea451ab0ae0e1aa55ba768` are never continued. Old source refs, runner,
 worktree, claims, inbox/history, auth home, credentials, configuration and venv
 are retained. The new worker reuses existing protected auth/context/venv and
-read-only token binds; there is no credential creation or device login. Root
-does not read provider auth-store contents. Normal worker auth use remains part
+read-only token binds; there is no credential creation or device login. Root validates the reused token file metadata and device-only public config
+before a bind; it does not read token/provider auth-store contents. Normal worker auth use remains part
 of the separately approved one model attempt.
 
 ## Changes and failure boundaries
@@ -77,9 +77,9 @@ the manager separately checks its eventual result before any suitable merge.
 
 ## Immutable entry and manifest
 
-Source commit: `59c50516b6bbaa3f215bfab701b7975657efc4c1`.
+Source commit: `c12a60ca1c265e4b7085027bf809234367db07b2`.
 
-- `attempt_a2.py` SHA256: `2b80188a488b75b12f32220e90c1db06716eddf8d746d951cb2812b0c8588383`
+- `attempt_a2.py` SHA256: `211867c828edc0d18f493790665c688c90edcd3d0cf6246b8ae47e099ed2ca54`
 - `release_a2.json` SHA256: `88fc917ddd132bfed497216c97df35a9f025d5c0cc56b0cbbb8b03a51e61e353`
 
 The source entry and manifest pin all root/worker dependencies. Defaults are
@@ -97,8 +97,8 @@ read -r -p 'Existing protected setup workspace (absolute path): ' A2_WORKSPACE
 read -r -p 'Exact newly approved manager instruction ID: ' A2_INSTRUCTION
 python3 -I -B -c '
 import hashlib,re,signal,sys,urllib.request
-commit="59c50516b6bbaa3f215bfab701b7975657efc4c1"
-expected="2b80188a488b75b12f32220e90c1db06716eddf8d746d951cb2812b0c8588383"
+commit="c12a60ca1c265e4b7085027bf809234367db07b2"
+expected="211867c828edc0d18f493790665c688c90edcd3d0cf6246b8ae47e099ed2ca54"
 manifest="88fc917ddd132bfed497216c97df35a9f025d5c0cc56b0cbbb8b03a51e61e353"
 workspace,instruction=sys.argv[1:]
 if not re.fullmatch("[1-9][0-9]{0,19}",instruction):raise SystemExit("STOP: instruction ID")
