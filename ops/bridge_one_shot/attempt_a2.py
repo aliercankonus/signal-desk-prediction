@@ -115,6 +115,17 @@ def clone(source,destination,*,pin=PIN,uid=10000,gid=10000,run=git):
             os.chown(p,uid,gid)
         os.chown(parent,uid,gid)
 
+def reused_inputs(old,host):
+    # Reuse the existing credential by file bind, never by copying/reading it.
+    # Validate the source before Docker can follow a changed/symlinked path.
+    for path in (old.auth,old.home):host.trusted_worker_mount(path,old.uid)
+    info=(old.auth/'github-token').lstat()
+    if (not stat.S_ISREG(info.st_mode) or (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode),info.st_nlink)!=(old.uid,old.gid,0o400,1)):
+        raise Stop('REUSED_TOKEN_METADATA')
+    if host.worker_private_bytes(old.home/'config.yaml',old.uid)!=b'auth:\n  adopt_external_logins: false\n  codex_login_flow: device_code\n':
+        raise Stop('REUSED_DEVICE_ONLY_CONFIG')
+
+
 def stage(w,old,host,auth,signer,blobs,ident,*,clone_runner=clone):
     auth.root_dir(w)
     original=json.loads(auth.blob(w/(OLD+'-bootstrap-spec.json')))
@@ -131,6 +142,7 @@ def stage(w,old,host,auth,signer,blobs,ident,*,clone_runner=clone):
         local=old.bundle/Path(name).name
         mode=0o444 if local.name in ('worker_probe.py','connect_proxy.py','worker_credential.py','worker_preflight.py') else 0o600
         if hashlib.sha256(auth.blob(local,mode=mode)).hexdigest()!=digest:raise Stop('OLD_BUNDLE_DIGEST')
+    reused_inputs(old,host)
     client=signer.GitHub(old.signer_token,deadline=time.monotonic()+120)
     row=instruction(client,ident);task=client.task(43)
     if task.get('state')!='open' or hashlib.sha256(task['body'].encode()).hexdigest()!=DIGEST:raise Stop('FROZEN_TASK')
@@ -227,14 +239,13 @@ print(json.dumps(result,sort_keys=True))
 '''
 
 
-def native_evidence(plan,host):
+def native_evidence(plan,host,queue_id=None):
     # All worker files are claims. Bind their mapping, project only bounded enum/
     # numeric fields, and never imply an independently proven provider cause.
-    paths=list((plan.state/'queue').glob('*/bridge/native-cli-exit.json'))
     evidence={'receipt':'missing-or-uncertain'}
-    if len(paths)!=1:return evidence
-    path=paths[0];queue_id=path.parents[1].name
-    if not re.fullmatch('[0-9a-f]{32}',queue_id):return evidence
+    if not isinstance(queue_id,str) or not re.fullmatch('[0-9a-f]{32}',queue_id):return evidence
+    path=plan.state/'queue'/queue_id/'bridge'/'native-cli-exit.json'
+    if not os.path.lexists(path):return evidence
     rec=json.loads(host.worker_private_bytes(path,10000,4096))
     entry=json.loads(host.worker_private_bytes(path.parents[1]/'state.json',10000,8192))
     allowed={'unclassified','cli_option_rejected','write_root_refused','http_401_observed','http_403_observed','http_429_observed'}
@@ -305,6 +316,7 @@ def configure(root,plan,old,host,auth,cleanup,readback,signer,ident,row,scope):
         if current is None and ops.claim_status.get('status') in ('empty','rate-limited','waiting'):return ()
         if (not isinstance(current,dict) or current.get('grant_id')!=ops.a2_grant or current.get('instruction_id')!=ident or
             current.get('publication_intent') is not None or current.get('status') not in ('blocked','review-ready')):raise Stop('A2_CLAIM_UNCERTAIN')
+        ops.a2_claim=current
         # A returned, durably blocked claim is not a reason to leave the known
         # containers running. Preserve the claim; exact root-only cleanup follows.
         return ()
@@ -329,7 +341,7 @@ def configure(root,plan,old,host,auth,cleanup,readback,signer,ident,row,scope):
     ops.cleanup_readback=cleanup_readback
     original_report=ops.report
     def report(summary):
-        ops.remote_result=dict(ops.remote_result or {},native_evidence=native_evidence(plan,host))
+        ops.remote_result=dict(ops.remote_result or {},native_evidence=native_evidence(plan,host,(getattr(ops,'a2_claim',None) or {}).get('queue_id')))
         return original_report(summary)
     ops.report=report
     return ops

@@ -270,9 +270,9 @@ def test_native_evidence_binds_queue_run_authority_and_never_copies_raw(tmp_path
     entry=dict(kind='bridge',id=q,bridge_run_id=r,invocations=1,authorization_identity=m.AUTHORITY,bridge_state='/state/queue/'+q+'/bridge')
     (folder/'native-cli-exit.json').write_text(json.dumps(rec));(folder.parent/'state.json').write_text(json.dumps(entry))
     host=SimpleNamespace(worker_private_bytes=lambda p,*a:p.read_bytes());plan=SimpleNamespace(state=state)
-    result=m.native_evidence(plan,host);assert result['run_id']==r and 'PRIVATE' not in json.dumps(result)
+    result=m.native_evidence(plan,host,q);assert result['run_id']==r and 'PRIVATE' not in json.dumps(result)
     entry['authorization_identity']='old';(folder.parent/'state.json').write_text(json.dumps(entry))
-    assert m.native_evidence(plan,host)=={'receipt':'missing-or-uncertain'}
+    assert m.native_evidence(plan,host,q)=={'receipt':'missing-or-uncertain'}
 
 
 def test_fresh_stage_requires_original_transition_cleanup_and_unused_remote(monkeypatch,tmp_path):
@@ -305,6 +305,7 @@ def test_fresh_stage_requires_original_transition_cleanup_and_unused_remote(monk
     auth=SimpleNamespace(root_dir=lambda *a:None,blob=lambda p,**kw:p.read_bytes(),RELEASE={},SOURCE=raw['merge'],WORKER_PREFLIGHT_V3=b'reviewed')
     monkeypatch.setattr(m,'put',lambda p,data,*a,**kw:p.write_bytes(data if isinstance(data,bytes) else m.canonical(data)))
     monkeypatch.setattr(m,'mkdir',lambda p,*a:p.mkdir(mode=0o700))
+    monkeypatch.setattr(m,'reused_inputs',lambda *a:None)  # ownership seam; real metadata validator tested separately
     cloned=[]
     with pytest.raises(m.Stop,match='NEW_BRANCH_OR_PR'):m.stage(tmp_path,plan,host_module,auth,signer,{'capture':b'reviewed'},7000000000,clone_runner=lambda *a:cloned.append(a))
     assert not (tmp_path/m.ATTEMPT).exists() and not cloned
@@ -405,3 +406,26 @@ def test_operator_block_parses_and_binds_exact_source_and_manifest(tmp_path):
     from unittest.mock import patch
     with patch('urllib.request.build_opener',return_value=SimpleNamespace(open=lambda *a,**kw:Response())),patch.object(sys,'argv',['loader','/private','7000000000']):
         with pytest.raises(SystemExit,match='entry digest'):exec(compile(embedded,'<operator-loader>','exec'),scope)
+
+
+
+def test_reused_token_checks_only_metadata_and_device_config(monkeypatch):
+    host=load('a2_reused_inputs_host','ops/bridge_one_shot/operator_host_v2.py')
+    with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+        root=Path(directory);root.chmod(0o700)
+        auth=root/'auth';home=root/'home';auth.mkdir(mode=0o700);home.mkdir(mode=0o700)
+        token=auth/'github-token';token.write_bytes(b'synthetic-never-read');token.chmod(0o400)
+        config=home/'config.yaml';config.write_bytes(b'auth:\n  adopt_external_logins: false\n  codex_login_flow: device_code\n');config.chmod(0o600)
+        old=SimpleNamespace(auth=auth,home=home,uid=os.geteuid(),gid=os.getegid())
+        original=host.worker_private_bytes
+        def read(path,*a):
+            assert path==config  # No token/auth-store content access.
+            return original(path,*a)
+        monkeypatch.setattr(host,'worker_private_bytes',read)
+        m.reused_inputs(old,host)
+        token.chmod(0o600)
+        with pytest.raises(m.Stop,match='TOKEN_METADATA'):m.reused_inputs(old,host)
+        token.chmod(0o400);token.rename(auth/'retained');token.symlink_to(auth/'retained')
+        with pytest.raises(m.Stop,match='TOKEN_METADATA'):m.reused_inputs(old,host)
+        token.unlink();(auth/'retained').rename(token);config.write_text('different nonsecret config')
+        with pytest.raises(m.Stop,match='DEVICE_ONLY'):m.reused_inputs(old,host)
