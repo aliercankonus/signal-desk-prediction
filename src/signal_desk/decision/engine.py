@@ -32,7 +32,7 @@ class DecisionEngine:
     def decide(self, inp: DecisionInput) -> dict:
         reasons: list[str] = []
         blocked: list[str] = []
-        if inp.data_stale:
+        if inp.data_stale and not inp.has_position:
             blocked.append("DATA_STALE")
         if not inp.risk_can_enter and not inp.has_position:
             blocked.append("RISK_BLOCK_ENTER")

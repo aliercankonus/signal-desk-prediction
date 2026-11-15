@@ -3,13 +3,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
 from signal_desk.config.loader import validate_config
 from signal_desk.schemas.validate import validate_json
-from signal_desk.storage.jsonl import read_jsonl
 
 
 def utc_now_iso() -> str:
@@ -19,20 +19,28 @@ def utc_now_iso() -> str:
 def _count_jsonl(path: Path) -> int:
     if not path.exists():
         return 0
-    return sum(1 for _ in read_jsonl(path))
+    with path.open("rb") as f:
+        return sum(1 for line in f if line.strip())
 
 
-def _iter_jsonl_files(path: Path) -> Iterable[Path]:
+_DATE_IN_NAME = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _iter_jsonl_files(path: Path, date: str | None = None) -> Iterable[Path]:
     if not path.exists():
         return []
-    return sorted(p for p in path.rglob("*.jsonl") if p.is_file())
+    files = (p for p in path.rglob("*.jsonl") if p.is_file())
+    if date is not None:
+        # Day-partitioned files (e.g. binance_btcusdt_depth_YYYY-MM-DD.jsonl) count only for their own date.
+        files = (p for p in files if date in _DATE_IN_NAME.findall(p.name) or not _DATE_IN_NAME.search(p.name))
+    return sorted(files)
 
 
 def generate_eod_report(config: dict, *, date: str, revision: int = 1) -> dict:
     base = Path(config["storage"]["base_path"])
-    raw_count = sum(_count_jsonl(p) for p in _iter_jsonl_files(Path(config["storage"]["raw_path"])))
-    feature_count = sum(_count_jsonl(p) for p in _iter_jsonl_files(Path(config["storage"]["feature_path"])))
-    ledger_count = sum(_count_jsonl(p) for p in _iter_jsonl_files(Path(config["storage"]["ledger_path"])))
+    raw_count = sum(_count_jsonl(p) for p in _iter_jsonl_files(Path(config["storage"]["raw_path"]), date))
+    feature_count = sum(_count_jsonl(p) for p in _iter_jsonl_files(Path(config["storage"]["feature_path"]), date))
+    ledger_count = sum(_count_jsonl(p) for p in _iter_jsonl_files(Path(config["storage"]["ledger_path"]), date))
     report_base = {
         "date": date,
         "revision": revision,

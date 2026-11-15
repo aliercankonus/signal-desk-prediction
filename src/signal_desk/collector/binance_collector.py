@@ -298,7 +298,7 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
         book = L2BookState()
         snapshot_event = map_snapshot(snapshot, symbol=symbol, raw_stream="rest_depth_snapshot")
         book.apply_snapshot(snapshot_event)
-        write_event(config, snapshot_event)
+        await asyncio.to_thread(write_event, config, snapshot_event)
         written = 1
         depth_events = trade_events = stale_depth_events = 0
         synchronized = False
@@ -339,7 +339,8 @@ async def collect_connected_stream(ws: Any, config: dict, max_events: int | None
             else:
                 trade_events += 1
                 last_trade = now()
-            write_event(config, event)
+            # Blocking validation and fsync must not stall the WebSocket reader.
+            await asyncio.to_thread(write_event, config, event)
             written += 1
             stats = dict(written_events=written, depth_events=depth_events,
                          trade_events=trade_events, stale_depth_events=stale_depth_events,
