@@ -56,7 +56,8 @@ def map_depth_delta(delta: dict[str, Any], *, symbol: str = "BTCUSDT", raw_strea
     # Binance spot depth update fields: e event type, E event time, s symbol, U first update ID, u final update ID, b bids, a asks.
     first_update_id = int(delta["U"])
     final_update_id = int(delta["u"])
-    exchange_ts = ms_to_iso(int(delta.get("E")))
+    event_ms = delta.get("E")
+    exchange_ts = ms_to_iso(int(event_ms) if event_ms is not None else None)
     received_ts = utc_now_iso()
     return {
         "event_id": f"binance:{symbol}:depth:{first_update_id}:{final_update_id}",
@@ -90,7 +91,8 @@ def map_trade(trade: dict[str, Any], *, symbol: str = "BTCUSDT", raw_stream: str
     is_buyer_maker = bool(trade.get("m"))
     side = "sell" if is_buyer_maker else "buy"
     trade_id = trade.get("t")
-    exchange_ts = ms_to_iso(int(trade.get("T", trade.get("E"))))
+    trade_ms = trade.get("T", trade.get("E"))
+    exchange_ts = ms_to_iso(int(trade_ms) if trade_ms is not None else None)
     return {
         "event_id": f"binance:{symbol}:trade:{trade_id}",
         "exchange": "binance",

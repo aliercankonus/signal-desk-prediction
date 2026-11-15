@@ -30,5 +30,5 @@ class RecoveryPolicy:
         return policy
 
     def delay(self, failures):
-        return min(self.retry_max_seconds, self.retry_initial_seconds * 2 ** (failures - 1))
+        return min(self.retry_max_seconds, self.retry_initial_seconds * 2 ** (max(1, failures) - 1))
 

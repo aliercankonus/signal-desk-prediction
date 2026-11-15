@@ -27,6 +27,9 @@ def replay_events(input_path: str | Path, output_path: str | Path, *, symbol: st
                 top = book.top_of_book()
         except OrderBookGap:
             stats["gaps"] += 1
+            # Discard the desynchronized book; features must not reuse its stale top until the next snapshot.
+            book = L2BookState(state="RESYNCING")
+            features.best_bid = features.best_bid_qty = features.best_ask = features.best_ask_qty = None
             stats["last_state"] = book.state
             continue
         snapshot = features.update(event, top_of_book=top)

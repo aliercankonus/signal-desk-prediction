@@ -23,8 +23,14 @@ def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
     rows = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
-            if line.strip():
+            if not line.strip():
+                continue
+            try:
                 rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                # Only an unterminated last line (interrupted append) is skipped; mid-file corruption still fails.
+                if line.endswith("\n"):
+                    raise
     return rows
 
 
